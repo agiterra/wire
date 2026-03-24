@@ -164,6 +164,12 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const err = await requireAgent(c, agent_id);
     if (err) return err;
 
+    // Disconnect any prior active sessions for this agent
+    const stale = store.getActiveSessions(agent_id);
+    for (const s of stale) {
+      store.disconnectSession(s.id);
+    }
+
     store.touchAgent(agent_id);
     const session = store.createSession(agent_id);
 
