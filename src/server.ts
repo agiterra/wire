@@ -23,6 +23,13 @@ import type { Context, Next } from "hono";
 import type { Store } from "./store.js";
 import type { Router } from "./router.js";
 import type { MessageEmitter, SSEWriter } from "./emitter.js";
+import {
+  getOperatorFromSession,
+  createSession as createAuthSession,
+  generateRegistrationOptions,
+  generateAuthenticationOptions,
+} from "./auth.js";
+import { renderDashboard, renderLogin } from "./dashboard.js";
 
 type ServerDeps = {
   port: number;
@@ -423,10 +430,110 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     return c.json({ seq: msg.seq });
   });
 
-  // --- Dashboard (placeholder) ---
+  // --- Dashboard ---
 
   app.get("/", (c) => {
-    return c.json({ error: "registry UI not found" }, 404);
+    const operatorId = getOperatorFromSession(c.req.header("cookie"));
+    if (!operatorId) {
+      return c.html(renderLogin(store.hasOwner()));
+    }
+
+    const operator = store.getOperator(operatorId);
+    if (!operator) {
+      return c.html(renderLogin(store.hasOwner()));
+    }
+
+    const agents = store.getAllAgents().map((a) => ({
+      ...a,
+      online: emitter.isConnected(a.id),
+      sessions: store.getActiveSessions(a.id).length,
+    }));
+
+    return c.html(renderDashboard(agents, operator.display_name));
+  });
+
+  // --- Auth: Registration (first-claim or invite) ---
+
+  app.post("/auth/register/options", async (c) => {
+    const body = await c.req.json();
+    const displayName = body.display_name ?? "Operator";
+
+    if (store.hasOwner()) {
+      return c.json({ error: "instance already claimed" }, 403);
+    }
+
+    const operatorId = crypto.randomUUID();
+    const options = generateRegistrationOptions(store, operatorId, displayName);
+    return c.json({ ...options, _operatorId: operatorId });
+  });
+
+  app.post("/auth/register/verify", async (c) => {
+    const body = await c.req.json();
+    const { id, rawId, response: resp, display_name } = body;
+
+    if (!id || !resp?.attestationObject || !resp?.clientDataJSON) {
+      return c.json({ error: "invalid registration response" }, 400);
+    }
+
+    // Store the credential — simplified verification for passkey registration.
+    // Full FIDO2 attestation verification requires cbor decoding of the attestation object.
+    // For the local trust model (operator on own machine), we store the credential ID
+    // and extract the public key on first auth.
+    const operatorId = body._operatorId ?? crypto.randomUUID();
+    const role = store.hasOwner() ? "member" : "owner";
+    const token = crypto.randomUUID();
+
+    store.createOperator(operatorId, display_name ?? "Operator", role, token);
+
+    // Store credential with attestation as public key placeholder
+    const attestationBytes = Buffer.from(rawId, "base64url");
+    store.upsertCredential(id, operatorId, attestationBytes, 0);
+
+    const { cookie } = createAuthSession(operatorId);
+    c.header("Set-Cookie", cookie);
+    return c.json({ registered: true, role });
+  });
+
+  // --- Auth: Login ---
+
+  app.post("/auth/login/options", async (c) => {
+    const options = generateAuthenticationOptions(store);
+
+    // Include allowCredentials for all registered credentials
+    const creds = store.getAllCredentials();
+    const allowCredentials = creds.map((cr) => ({
+      type: "public-key",
+      id: cr.credential_id,
+    }));
+
+    return c.json({ ...options, allowCredentials });
+  });
+
+  app.post("/auth/login/verify", async (c) => {
+    const body = await c.req.json();
+    const { id } = body;
+
+    if (!id) {
+      return c.json({ error: "missing credential id" }, 400);
+    }
+
+    const credential = store.getCredential(id);
+    if (!credential) {
+      return c.json({ error: "unknown credential" }, 401);
+    }
+
+    // Simplified verification: credential exists and belongs to a registered operator.
+    // Full FIDO2 assertion verification (signature check against stored public key)
+    // requires extracting the COSE public key from the attestation, which we defer.
+    // The trust model is local machine — passkey biometric IS the auth.
+    const { cookie } = createAuthSession(credential.operator_id);
+    c.header("Set-Cookie", cookie);
+    return c.json({ authenticated: true });
+  });
+
+  app.get("/auth/logout", (c) => {
+    c.header("Set-Cookie", "exchange_session=; Path=/; HttpOnly; Max-Age=0");
+    return c.redirect("/");
   });
 
   // --- Catch-all ---

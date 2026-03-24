@@ -356,6 +356,84 @@ export class Store {
     ).run(messageSeq, agentId, Date.now(), result, error ?? null);
   }
 
+  // --- Operators ---
+
+  getOperator(id: string): { id: string; display_name: string; role: string; token: string } | null {
+    return this.db.prepare("SELECT * FROM operators WHERE id = ?").get(id) as any ?? null;
+  }
+
+  getOperatorByToken(token: string): { id: string; display_name: string; role: string } | null {
+    return this.db.prepare("SELECT id, display_name, role FROM operators WHERE token = ?").get(token) as any ?? null;
+  }
+
+  hasOwner(): boolean {
+    return !!(this.db.prepare("SELECT 1 FROM operators WHERE role = 'owner' LIMIT 1").get());
+  }
+
+  createOperator(id: string, displayName: string, role: string, token: string): void {
+    this.db.prepare(
+      "INSERT INTO operators (id, display_name, role, token, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(id, displayName, role, token, Date.now());
+  }
+
+  // --- Passkey Credentials ---
+
+  getCredential(credentialId: string): { credential_id: string; operator_id: string; public_key: Buffer; counter: number } | null {
+    return this.db.prepare("SELECT * FROM passkey_credentials WHERE credential_id = ?").get(credentialId) as any ?? null;
+  }
+
+  getCredentialsByOperator(operatorId: string): { credential_id: string; public_key: Buffer; counter: number }[] {
+    return this.db.prepare("SELECT * FROM passkey_credentials WHERE operator_id = ?").all(operatorId) as any[];
+  }
+
+  getAllCredentials(): { credential_id: string; operator_id: string; public_key: Buffer; counter: number }[] {
+    return this.db.prepare("SELECT * FROM passkey_credentials").all() as any[];
+  }
+
+  upsertCredential(credentialId: string, operatorId: string, publicKey: Buffer, counter: number, transports?: string): void {
+    this.db.prepare(`
+      INSERT INTO passkey_credentials (credential_id, operator_id, public_key, counter, transports, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(credential_id) DO UPDATE SET counter = excluded.counter
+    `).run(credentialId, operatorId, publicKey, counter, transports ?? null, Date.now());
+  }
+
+  updateCredentialCounter(credentialId: string, counter: number): void {
+    this.db.prepare("UPDATE passkey_credentials SET counter = ? WHERE credential_id = ?").run(counter, credentialId);
+  }
+
+  // --- Challenges ---
+
+  storeChallenge(challenge: string): void {
+    this.db.prepare("INSERT INTO challenges (id, challenge, created_at) VALUES (?, ?, ?)").run(
+      crypto.randomUUID(), challenge, Date.now()
+    );
+    // Clean up old challenges (> 5 min)
+    this.db.prepare("DELETE FROM challenges WHERE created_at < ?").run(Date.now() - 300_000);
+  }
+
+  consumeChallenge(challenge: string): boolean {
+    const row = this.db.prepare("SELECT id FROM challenges WHERE challenge = ?").get(challenge);
+    if (!row) return false;
+    this.db.prepare("DELETE FROM challenges WHERE challenge = ?").run(challenge);
+    return true;
+  }
+
+  // --- Invites ---
+
+  createInvite(code: string, createdBy: string, label?: string): void {
+    this.db.prepare(
+      "INSERT INTO invites (code, created_by, label, created_at) VALUES (?, ?, ?, ?)"
+    ).run(code, createdBy, label ?? null, Date.now());
+  }
+
+  consumeInvite(code: string, usedBy: string): boolean {
+    const invite = this.db.prepare("SELECT * FROM invites WHERE code = ? AND used_by IS NULL").get(code);
+    if (!invite) return false;
+    this.db.prepare("UPDATE invites SET used_by = ?, used_at = ? WHERE code = ?").run(usedBy, Date.now(), code);
+    return true;
+  }
+
   close(): void {
     this.db.close();
   }
