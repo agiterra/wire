@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS challenges (
     challenge       TEXT NOT NULL,
     created_at      INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS operator_sessions (
+    id              TEXT PRIMARY KEY,
+    operator_id     TEXT NOT NULL REFERENCES operators(id),
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operator_sessions_operator ON operator_sessions(operator_id);
 `;
 
 export type Message = {
@@ -467,6 +475,26 @@ export class Store {
     if (!invite) return false;
     this.db.prepare("UPDATE invites SET used_by = ?, used_at = ? WHERE code = ?").run(usedBy, Date.now(), code);
     return true;
+  }
+
+  // --- Operator Sessions (persistent) ---
+
+  createOperatorSession(operatorId: string, ttlMs: number): string {
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    this.db.prepare(
+      "INSERT INTO operator_sessions (id, operator_id, created_at, expires_at) VALUES (?, ?, ?, ?)"
+    ).run(id, operatorId, now, now + ttlMs);
+    // Clean expired
+    this.db.prepare("DELETE FROM operator_sessions WHERE expires_at < ?").run(now);
+    return id;
+  }
+
+  getOperatorSession(sessionId: string): { operator_id: string } | null {
+    const row = this.db.prepare(
+      "SELECT operator_id FROM operator_sessions WHERE id = ? AND expires_at > ?"
+    ).get(sessionId, Date.now()) as { operator_id: string } | null;
+    return row ?? null;
   }
 
   close(): void {

@@ -433,7 +433,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
   // --- Dashboard ---
 
   app.get("/", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"));
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
     if (!operatorId) {
       return c.html(renderLogin(store.hasOwner()));
     }
@@ -489,7 +489,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const attestationBytes = Buffer.from(rawId, "base64url");
     store.upsertCredential(id, operatorId, attestationBytes, 0);
 
-    const { cookie } = createAuthSession(operatorId);
+    const { cookie } = createAuthSession(operatorId, store);
     c.header("Set-Cookie", cookie);
     return c.json({ registered: true, role });
   });
@@ -521,7 +521,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     // Full FIDO2 assertion verification (signature check against stored public key)
     // requires extracting the COSE public key from the attestation, which we defer.
     // The trust model is local machine — passkey biometric IS the auth.
-    const { cookie } = createAuthSession(credential.operator_id);
+    const { cookie } = createAuthSession(credential.operator_id, store);
     c.header("Set-Cookie", cookie);
     return c.json({ authenticated: true });
   });
