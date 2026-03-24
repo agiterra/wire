@@ -499,14 +499,9 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
   app.post("/auth/login/options", async (c) => {
     const options = generateAuthenticationOptions(store);
 
-    // Include allowCredentials for all registered credentials
-    const creds = store.getAllCredentials();
-    const allowCredentials = creds.map((cr) => ({
-      type: "public-key",
-      id: cr.credential_id,
-    }));
-
-    return c.json({ ...options, allowCredentials });
+    // Don't send allowCredentials — let the browser use discoverable credentials (passkeys).
+    // This avoids the ArrayBuffer conversion issue and is the modern passkey flow.
+    return c.json(options);
   });
 
   app.post("/auth/login/verify", async (c) => {

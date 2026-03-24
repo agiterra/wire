@@ -385,10 +385,16 @@ export function renderLogin(hasOwner: boolean): string {
     async function doLogin() {
       const res = await fetch('/auth/login/options', { method: 'POST' });
       const options = await res.json();
-      options._challenge = options.challenge;
-      options.challenge = base64urlToBuffer(options.challenge);
+      const savedChallenge = options.challenge;
 
-      const credential = await navigator.credentials.get({ publicKey: options });
+      const publicKeyOptions = {
+        challenge: base64urlToBuffer(options.challenge),
+        rpId: options.rpId,
+        timeout: options.timeout,
+        userVerification: options.userVerification,
+      };
+
+      const credential = await navigator.credentials.get({ publicKey: publicKeyOptions });
       const response = credential.response;
 
       const verifyRes = await fetch('/auth/login/verify', {
@@ -403,7 +409,7 @@ export function renderLogin(hasOwner: boolean): string {
             signature: bufferToBase64url(response.signature),
           },
           type: credential.type,
-          challenge: options._challenge,
+          challenge: savedChallenge,
         }),
       });
 

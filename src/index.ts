@@ -13,6 +13,8 @@ const port = parseInt(process.env.EXCHANGE_PORT ?? "9800", 10);
 const dbPath = process.env.EXCHANGE_DB ?? `${process.env.HOME}/.exchange/exchange.db`;
 const sessionTtlMs = parseInt(process.env.SESSION_TTL_MS ?? "300000", 10); // 5 min default
 const reaperIntervalMs = parseInt(process.env.REAPER_INTERVAL_MS ?? "60000", 10); // 1 min default
+const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "3600000", 10); // 1 hour default
+const permanentAgents = (process.env.PERMANENT_AGENTS ?? "herald,fondant,brioche").split(",").map(s => s.trim());
 
 const store = new Store(dbPath);
 const emitter = new MessageEmitter();
@@ -21,9 +23,14 @@ const server = createServer({ port, store, router, emitter });
 
 // Session reaper — disconnect stale sessions
 setInterval(() => {
-  const reaped = store.reapStaleSessions(sessionTtlMs);
-  if (reaped > 0) {
-    console.log(`[reaper] disconnected ${reaped} stale session(s)`);
+  const sessionReaped = store.reapStaleSessions(sessionTtlMs);
+  if (sessionReaped > 0) {
+    console.log(`[reaper] disconnected ${sessionReaped} stale session(s)`);
+  }
+
+  const agentReaped = store.reapEphemeralAgents(ephemeralTtlMs, permanentAgents);
+  if (agentReaped.length > 0) {
+    console.log(`[reaper] removed ${agentReaped.length} ephemeral agent(s): ${agentReaped.join(", ")}`);
   }
 }, reaperIntervalMs);
 

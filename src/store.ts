@@ -356,6 +356,41 @@ export class Store {
     ).run(messageSeq, agentId, Date.now(), result, error ?? null);
   }
 
+  // --- Ephemeral agent cleanup ---
+
+  /**
+   * Remove ephemeral agents: no active sessions, no messages sent/received
+   * in the given TTL window, and not in the permanent list.
+   */
+  reapEphemeralAgents(ttlMs: number, permanentAgents: string[]): string[] {
+    const cutoff = Date.now() - ttlMs;
+    const placeholders = permanentAgents.map(() => "?").join(",");
+
+    // Find agents that:
+    // 1. Are not in the permanent list
+    // 2. Have no active (undisconnected) sessions
+    // 3. Haven't been seen since cutoff
+    const candidates = this.db.prepare(`
+      SELECT a.id FROM agents a
+      WHERE a.id NOT IN (${placeholders || "'__none__'"})
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions s
+          WHERE s.agent_id = a.id AND s.disconnected_at IS NULL
+        )
+        AND (a.last_seen_at IS NULL OR a.last_seen_at < ?)
+    `).all(...permanentAgents, cutoff) as { id: string }[];
+
+    const reaped: string[] = [];
+    for (const { id } of candidates) {
+      this.db.prepare("DELETE FROM subscriptions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+      reaped.push(id);
+    }
+    return reaped;
+  }
+
   // --- Operators ---
 
   getOperator(id: string): { id: string; display_name: string; role: string; token: string } | null {
