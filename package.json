@@ -1,0 +1,18 @@
+{
+  "name": "@agiterra/exchange",
+  "version": "0.3.0",
+  "description": "The Exchange — persistent multi-agent message broker, event log, and registry.",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "license": "MIT",
+  "author": "Tim Garthwaite <https://github.com/mividtim>"
+}
