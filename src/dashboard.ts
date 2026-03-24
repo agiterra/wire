@@ -223,14 +223,19 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + '…' : '—';
         return '<tr>' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name copyable" onclick="copy(\\''+esc(a.id)+'\\')\" title="Click to copy">' + esc(a.id) + '</td>' +
+          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy">' + esc(a.id) + '</td>' +
           '<td>' + esc(a.display_name) + '</td>' +
-          '<td class="copyable" onclick="copy(\\''+esc(a.pubkey)+'\\')\" title="Click to copy full pubkey">' + pubkeyShort + '</td>' +
+          '<td class="copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full pubkey">' + pubkeyShort + '</td>' +
           '<td>' + a.sessions + '</td>' +
           '<td class="plan">' + esc(planSnippet) + '</td>' +
           '<td class="dim">' + lastSeen + '</td>' +
           '</tr>';
       }).join('');
+
+      // Re-bind click handlers via delegation
+      tbody.querySelectorAll('[data-copy]').forEach(el => {
+        el.onclick = () => copy(el.dataset.copy);
+      });
     };
 
     function esc(s) {
