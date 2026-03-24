@@ -201,6 +201,42 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   <footer>The Exchange · agiterra · port ${process.env.EXCHANGE_PORT ?? "9800"}</footer>
 
   <script>
+    // --- Live SSE updates ---
+    const evtSource = new EventSource('/dashboard/stream');
+    evtSource.onmessage = (e) => {
+      const agents = JSON.parse(e.data);
+
+      // Update stats
+      document.querySelector('.stats').innerHTML = [
+        '<div><span class="stat-value">' + agents.length + '</span> agents</div>',
+        '<div><span class="stat-value">' + agents.filter(a => a.online).length + '</span> online</div>',
+        '<div><span class="stat-value">' + agents.reduce((n, a) => n + a.sessions, 0) + '</span> sessions</div>',
+      ].join('');
+
+      // Update table body
+      const tbody = document.querySelector('tbody');
+      tbody.innerHTML = agents.map(a => {
+        const status = a.online ? '●' : '○';
+        const statusColor = a.online ? '#4ade80' : '#6b7280';
+        const planSnippet = a.plan ? a.plan.slice(0, 80) + (a.plan.length > 80 ? '…' : '') : '—';
+        const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : 'never';
+        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + '…' : '—';
+        return '<tr>' +
+          '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
+          '<td class="agent-name copyable" onclick="copy(\\''+esc(a.id)+'\\')\" title="Click to copy">' + esc(a.id) + '</td>' +
+          '<td>' + esc(a.display_name) + '</td>' +
+          '<td class="copyable" onclick="copy(\\''+esc(a.pubkey)+'\\')\" title="Click to copy full pubkey">' + pubkeyShort + '</td>' +
+          '<td>' + a.sessions + '</td>' +
+          '<td class="plan">' + esc(planSnippet) + '</td>' +
+          '<td class="dim">' + lastSeen + '</td>' +
+          '</tr>';
+      }).join('');
+    };
+
+    function esc(s) {
+      return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
+    }
+
     function copy(text) {
       navigator.clipboard.writeText(text).then(() => {
         // Brief flash

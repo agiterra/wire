@@ -452,6 +452,52 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     return c.html(renderDashboard(agents, operator.display_name));
   });
 
+  // --- Dashboard SSE (live agent status) ---
+
+  app.get("/dashboard/stream", (c) => {
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    if (!operatorId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const write = (data: string) => {
+            try { controller.enqueue(encoder.encode(data)); } catch {}
+          };
+
+          // Send initial state
+          const sendState = () => {
+            const agents = store.getAllAgents().map((a) => ({
+              ...a,
+              online: emitter.isConnected(a.id),
+              sessions: store.getActiveSessions(a.id).length,
+            }));
+            write(`data: ${JSON.stringify(agents)}\n\n`);
+          };
+
+          sendState();
+
+          // Poll every 3 seconds for changes
+          const interval = setInterval(sendState, 3000);
+
+          c.req.raw.signal.addEventListener("abort", () => {
+            clearInterval(interval);
+          });
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      },
+    );
+  });
+
   // --- Auth: Registration (first-claim or invite) ---
 
   app.post("/auth/register/options", async (c) => {
