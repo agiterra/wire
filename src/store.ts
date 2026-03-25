@@ -312,6 +312,15 @@ export class Store {
     ).run(Date.now(), Date.now(), sessionId);
   }
 
+  /** True if agent has any active session with a heartbeat within ttlMs. */
+  hasRecentHeartbeat(agentId: string, ttlMs: number): boolean {
+    const cutoff = Date.now() - ttlMs;
+    const row = this.db.prepare(
+      "SELECT 1 FROM agent_sessions WHERE agent_id = ? AND disconnected_at IS NULL AND last_heartbeat > ? LIMIT 1"
+    ).get(agentId, cutoff);
+    return !!row;
+  }
+
   // Reaper: disconnect sessions with stale heartbeats
   reapStaleSessions(ttlMs: number): number {
     const cutoff = Date.now() - ttlMs;

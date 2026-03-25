@@ -18,7 +18,7 @@ const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "3600000", 10); 
 const store = new Store(dbPath);
 const emitter = new MessageEmitter();
 const router = new Router(store, emitter);
-const server = createServer({ port, store, router, emitter });
+const server = createServer({ port, store, router, emitter, sessionTtlMs });
 
 // Session reaper — disconnect stale sessions
 setInterval(() => {

@@ -61,6 +61,7 @@ type ServerDeps = {
   store: Store;
   router: Router;
   emitter: MessageEmitter;
+  sessionTtlMs: number;
 };
 
 // --- Ed25519 signature verification ---
@@ -83,7 +84,7 @@ async function verifyEd25519(pubkeyB64: string, signature: string, body: string)
   }
 }
 
-export function createServer({ port, store, router, emitter }: ServerDeps) {
+export function createServer({ port, store, router, emitter, sessionTtlMs }: ServerDeps) {
   const app = new Hono();
 
   app.use("*", cors());
@@ -169,7 +170,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const agents = store.getAllAgents();
     const result = agents.map((a) => ({
       ...a,
-      online: emitter.isConnected(a.id),
+      online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
       sessions: store.getActiveSessions(a.id).length,
     }));
     return c.json(result);
@@ -490,7 +491,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
 
     const agents = store.getAllAgents().map((a) => ({
       ...a,
-      online: emitter.isConnected(a.id),
+      online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
       sessions: store.getActiveSessions(a.id).length,
     }));
 
@@ -577,7 +578,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
           const sendState = () => {
             const agents = store.getAllAgents().map((a) => ({
               ...a,
-              online: emitter.isConnected(a.id),
+              online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
               sessions: store.getActiveSessions(a.id).length,
             }));
             write(`data: ${JSON.stringify(agents)}\n\n`);
