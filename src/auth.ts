@@ -1,5 +1,5 @@
 /**
- * WebAuthn / Passkey authentication for the Exchange dashboard.
+ * WebAuthn / Passkey authentication for the Wire dashboard.
  *
  * First-claim ownership: first operator to register owns the instance.
  * Invite links for additional operators.
@@ -8,7 +8,7 @@
 
 import type { Store } from "./store.js";
 
-const SESSION_COOKIE = "exchange_session";
+const SESSION_COOKIE = "wire_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export function getOperatorFromSession(cookie: string | undefined, store: Store): string | null {
@@ -32,11 +32,11 @@ export function createSession(operatorId: string, store: Store): { sessionId: st
 // --- WebAuthn helpers ---
 
 export function getRpId(): string {
-  return process.env.EXCHANGE_RP_ID ?? "localhost";
+  return process.env.WIRE_RP_ID ?? "localhost";
 }
 
 export function getRpName(): string {
-  return "The Exchange";
+  return "The Wire";
 }
 
 export function generateRegistrationOptions(store: Store, operatorId: string, displayName: string) {

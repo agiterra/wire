@@ -1,5 +1,5 @@
 /**
- * Exchange HTTP Server — Hono-based.
+ * Wire HTTP Server — Hono-based.
  *
  * Routes:
  *   GET  /health
@@ -17,6 +17,9 @@
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
+import { existsSync, readFileSync, watch, watchFile } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Context, Next } from "hono";
@@ -29,7 +32,29 @@ import {
   generateRegistrationOptions,
   generateAuthenticationOptions,
 } from "./auth.js";
-import { renderDashboard, renderLogin } from "./dashboard.js";
+import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
+import { dirname } from "path";
+import { fileURLToPath } from "url";
+
+// Hot-reload dashboard: re-import on file change via file:// URL cache busting
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const dashboardPath = join(__dirname, "dashboard.ts");
+let _renderDashboard = _initialRenderDashboard;
+const dashboardRefreshListeners = new Set<() => void>();
+
+async function reloadDashboard() {
+  try {
+    const mod = await import(`file://${dashboardPath}?v=${Date.now()}`);
+    _renderDashboard = mod.renderDashboard;
+    console.error("[wire] dashboard reloaded");
+    for (const listener of dashboardRefreshListeners) {
+      listener();
+    }
+  } catch (e) {
+    console.error("[wire] dashboard reload failed:", e);
+  }
+}
+watchFile(dashboardPath, { interval: 1000 }, () => reloadDashboard());
 
 type ServerDeps = {
   port: number;
@@ -58,52 +83,78 @@ async function verifyEd25519(pubkeyB64: string, signature: string, body: string)
   }
 }
 
-function isLocalhost(c: Context): boolean {
-  const host = c.req.header("host") ?? "";
-  return host.startsWith("localhost") || host.startsWith("127.0.0.1") || host.startsWith("[::1]");
-}
-
 export function createServer({ port, store, router, emitter }: ServerDeps) {
   const app = new Hono();
 
   app.use("*", cors());
 
-  // --- Agent control plane auth middleware ---
-  // Protects agent mutation endpoints. An agent can only modify its own resources.
-  // Auth: Ed25519 signature in X-Exchange-Signature header, OR localhost origin.
-  // The agent ID is extracted from the route param :id or from the request body.
+  // Cache raw body text so signature verification works after c.req.json()
+  app.use("*", async (c, next) => {
+    if (c.req.method === "POST" || c.req.method === "PUT") {
+      (c as any).set("rawBody", await c.req.raw.clone().text());
+    }
+    await next();
+  });
 
-  async function requireAgent(c: Context, agentId: string): Promise<Response | null> {
+  // --- Auth primitives ---
+
+  /** Verify Ed25519 signature against a specific agent's stored pubkey. */
+  async function verifyAgentSignature(c: Context, agentId: string): Promise<boolean> {
     const agent = store.getAgent(agentId);
-    if (!agent) {
-      return c.json({ error: `agent '${agentId}' not registered` }, 404);
-    }
-
-    const sig = c.req.header("x-exchange-signature");
-    if (sig) {
-      // Verify Ed25519 signature against registered pubkey
-      const body = await c.req.raw.clone().text();
-      const valid = await verifyEd25519(agent.pubkey, sig, body);
-      if (!valid) {
-        return c.json({ error: "invalid signature" }, 403);
-      }
-      return null; // authorized
-    }
-
-    // No signature — allow if localhost (local agents connecting without signing)
-    if (isLocalhost(c)) {
-      return null; // authorized
-    }
-
-    return c.json({ error: "authentication required: X-Exchange-Signature or localhost" }, 401);
+    if (!agent) return false;
+    const sig = c.req.header("x-wire-signature");
+    if (!sig) return false;
+    const body = (c as any).get("rawBody") ?? "";
+    return verifyEd25519(agent.pubkey, sig, body);
   }
 
-  // Verify a session belongs to the claiming agent
-  function requireSessionOwner(sessionId: string, agentId?: string): string | null {
+  /** Check for authenticated operator via WebAuthn session cookie. */
+  function isOperator(c: Context): boolean {
+    return !!getOperatorFromSession(c.req.header("cookie"), store);
+  }
+
+  /** Verify a session belongs to the given agent. */
+  function isSessionOwner(sessionId: string, agentId: string): boolean {
     const session = store.getSession(sessionId);
-    if (!session) return "session not found";
-    if (agentId && session.agent_id !== agentId) return "session does not belong to agent";
-    return null; // ok
+    return !!session && session.agent_id === agentId;
+  }
+
+  // --- Auth gates (return error Response or null for authorized) ---
+
+  /** Require Ed25519 signature from a known agent. */
+  async function requireAgent(c: Context, agentId: string): Promise<Response | null> {
+    const agent = store.getAgent(agentId);
+    if (!agent) return c.json({ error: `agent '${agentId}' not registered` }, 404);
+    if (await verifyAgentSignature(c, agentId)) return null;
+    const sig = c.req.header("x-wire-signature");
+    if (!sig) return c.json({ error: "X-Wire-Signature required" }, 401);
+    return c.json({ error: "invalid signature" }, 403);
+  }
+
+  /** Require agent owns the session (+ agent signature). */
+  async function requireAgentSession(c: Context, agentId: string, sessionId: string): Promise<Response | null> {
+    const err = await requireAgent(c, agentId);
+    if (err) return err;
+    if (!isSessionOwner(sessionId, agentId)) return c.json({ error: "session does not belong to agent" }, 403);
+    return null;
+  }
+
+  /** Require authenticated operator (WebAuthn). */
+  function requireOperator(c: Context): Response | null {
+    if (isOperator(c)) return null;
+    return c.json({ error: "operator authentication required" }, 401) as unknown as Response;
+  }
+
+  /** Require either operator auth or signature from any registered agent. */
+  async function requireAgentOrOperator(c: Context): Promise<Response | null> {
+    if (isOperator(c)) return null;
+    const sig = c.req.header("x-wire-signature");
+    if (!sig) return c.json({ error: "X-Wire-Signature or operator session required" }, 401);
+    const body = (c as any).get("rawBody") ?? "";
+    for (const agent of store.getAllAgents()) {
+      if (await verifyEd25519(agent.pubkey, sig, body)) return null;
+    }
+    return c.json({ error: "invalid signature — no matching agent" }, 403);
   }
 
   // --- Health ---
@@ -126,23 +177,28 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
 
   app.post("/agents/register", async (c) => {
     const body = await c.req.json();
-    const { id, display_name, pubkey, subscriptions } = body;
+    const { id, display_name, pubkey, permanent, subscriptions } = body;
 
     if (!id || !display_name || !pubkey) {
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
     }
 
-    // Registration: if agent already exists, require auth (can't hijack identity)
     const existing = store.getAgent(id);
     if (existing) {
+      // Existing agent re-registering — must prove identity with stored pubkey
       const err = await requireAgent(c, id);
       if (err) return err;
-    } else if (!isLocalhost(c)) {
-      // New registrations only from localhost
-      return c.json({ error: "new agent registration requires localhost" }, 403);
+    } else if (permanent) {
+      // New permanent agent — operator only
+      const err = requireOperator(c);
+      if (err) return err;
+    } else {
+      // New ephemeral agent — operator or authenticated agent
+      const err = await requireAgentOrOperator(c);
+      if (err) return err;
     }
 
-    store.upsertAgent({ id, display_name, pubkey });
+    store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent });
 
     if (subscriptions && Array.isArray(subscriptions)) {
       store.setSubscriptions(id, subscriptions);
@@ -183,19 +239,12 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const body = await c.req.json();
     const { session_id, agent_id } = body;
 
-    if (!session_id) {
-      return c.json({ error: "missing session_id" }, 400);
+    if (!session_id || !agent_id) {
+      return c.json({ error: "missing session_id or agent_id" }, 400);
     }
 
-    // Verify session ownership if agent_id provided
-    if (agent_id) {
-      const err = await requireAgent(c, agent_id);
-      if (err) return err;
-      const ownerErr = requireSessionOwner(session_id, agent_id);
-      if (ownerErr) return c.json({ error: ownerErr }, 403);
-    } else if (!isLocalhost(c)) {
-      return c.json({ error: "agent_id required for remote disconnect" }, 400);
-    }
+    const err = await requireAgentSession(c, agent_id, session_id);
+    if (err) return err;
 
     store.disconnectSession(session_id);
     return c.json({ disconnected: true });
@@ -205,19 +254,12 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const body = await c.req.json();
     const { session_id, seq, agent_id } = body;
 
-    if (!session_id || seq == null) {
-      return c.json({ error: "missing session_id or seq" }, 400);
+    if (!session_id || seq == null || !agent_id) {
+      return c.json({ error: "missing session_id, seq, or agent_id" }, 400);
     }
 
-    // Verify session ownership if agent_id provided
-    if (agent_id) {
-      const err = await requireAgent(c, agent_id);
-      if (err) return err;
-      const ownerErr = requireSessionOwner(session_id, agent_id);
-      if (ownerErr) return c.json({ error: ownerErr }, 403);
-    } else if (!isLocalhost(c)) {
-      return c.json({ error: "agent_id required for remote ack" }, 400);
-    }
+    const err = await requireAgentSession(c, agent_id, session_id);
+    if (err) return err;
 
     store.ackSession(session_id, seq);
     return c.json({ acked: seq });
@@ -247,13 +289,13 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const agentId = c.req.param("id");
     const sessionId = c.req.query("session_id");
 
-    // SSE stream requires agent auth
-    const err = await requireAgent(c, agentId);
-    if (err) return err;
+    if (!sessionId) {
+      return c.json({ error: "missing session_id" }, 400);
+    }
 
-    const agent = store.getAgent(agentId);
-    if (!agent) {
-      return c.json({ error: `agent '${agentId}' not registered` }, 404);
+    // Auth via session ownership — session_id was obtained via signed connect
+    if (!isSessionOwner(sessionId, agentId)) {
+      return c.json({ error: "invalid session" }, 403);
     }
 
     return new Response(
@@ -306,11 +348,8 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
     const agentId = c.req.param("id");
     const sessionId = c.req.param("sid");
 
-    const err = await requireAgent(c, agentId);
+    const err = await requireAgentSession(c, agentId, sessionId);
     if (err) return err;
-
-    const ownerErr = requireSessionOwner(sessionId, agentId);
-    if (ownerErr) return c.json({ error: ownerErr }, 403);
 
     store.heartbeatSession(sessionId);
     return c.json({ ok: true });
@@ -455,7 +494,67 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
       sessions: store.getActiveSessions(a.id).length,
     }));
 
-    return c.html(renderDashboard(agents, operator.display_name));
+    return c.html(_renderDashboard(agents, operator.display_name));
+  });
+
+  // --- Tasks endpoint ---
+
+  app.get("/tasks", (c) => {
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    if (!operatorId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const tasksPath = join(homedir(), ".wire", "tasks.json");
+    if (!existsSync(tasksPath)) {
+      return c.json({ tasks: [], completed: [] });
+    }
+    try {
+      const data = JSON.parse(readFileSync(tasksPath, "utf-8"));
+      return c.json(data, 200, {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+      });
+    } catch {
+      return c.json({ error: "failed to read tasks" }, 500);
+    }
+  });
+
+  app.get("/tasks/stream", (c) => {
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    if (!operatorId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const tasksPath = join(homedir(), ".wire", "tasks.json");
+
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const enc = new TextEncoder();
+          const send = () => {
+            try {
+              if (existsSync(tasksPath)) {
+                const data = readFileSync(tasksPath, "utf-8");
+                controller.enqueue(enc.encode(`data: ${data.replace(/\n/g, "")}\n\n`));
+              }
+            } catch {}
+          };
+          // Send initial state
+          send();
+          // Watch for file changes
+          if (existsSync(tasksPath)) {
+            const watcher = watch(tasksPath, { persistent: false }, () => send());
+            c.req.raw.signal.addEventListener("abort", () => watcher.close());
+          }
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      },
+    );
   });
 
   // --- Dashboard SSE (live agent status) ---
@@ -489,8 +588,15 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
           // Poll every 3 seconds for changes
           const interval = setInterval(sendState, 3000);
 
+          // Hot-reload: tell client to refresh when dashboard.ts changes
+          const onRefresh = () => {
+            write(`event: refresh\ndata: reload\n\n`);
+          };
+          dashboardRefreshListeners.add(onRefresh);
+
           c.req.raw.signal.addEventListener("abort", () => {
             clearInterval(interval);
+            dashboardRefreshListeners.delete(onRefresh);
           });
         },
       }),
@@ -579,7 +685,7 @@ export function createServer({ port, store, router, emitter }: ServerDeps) {
   });
 
   app.get("/auth/logout", (c) => {
-    c.header("Set-Cookie", "exchange_session=; Path=/; HttpOnly; Max-Age=0");
+    c.header("Set-Cookie", "wire_session=; Path=/; HttpOnly; Max-Age=0");
     return c.redirect("/");
   });
 
@@ -610,18 +716,23 @@ async function runValidator(
     directory?: Record<string, { pubkey: string; display_name: string }>;
   },
 ): Promise<void> {
-  // Use Function constructor for lightweight validation.
+  // Use AsyncFunction constructor for lightweight validation.
   // The validator runs in the same process — the trust model is
   // "operator trusts agent-provided code" (same as installing a plugin).
-  const fn = new Function(
+  // AsyncFunction allows validators to use await (e.g., crypto.subtle).
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction(
     "headers",
     "body",
     "secrets",
     "crypto",
     "directory",
+    "rawBody",
     code,
   );
+  const rawBody = ctx.body;
   await fn(ctx.headers, ctx.body, ctx.secrets, {
+    subtle: crypto.subtle,
     createHmac: (algo: string, key: string) => {
       const encoder = new TextEncoder();
       const keyData = encoder.encode(key);
@@ -658,5 +769,5 @@ async function runValidator(
         return false;
       }
     },
-  }, ctx.directory ?? {});
+  }, ctx.directory ?? {}, rawBody);
 }

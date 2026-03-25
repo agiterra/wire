@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id              TEXT PRIMARY KEY,
     display_name    TEXT NOT NULL,
     pubkey          TEXT NOT NULL,
+    permanent       INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
     last_seen_at    INTEGER,
     plan            TEXT
@@ -134,6 +135,7 @@ export type Agent = {
   id: string;
   display_name: string;
   pubkey: string;
+  permanent: number; // 0 or 1 (SQLite boolean)
   created_at: number;
   last_seen_at: number | null;
   plan: string | null;
@@ -172,11 +174,20 @@ export class Store {
   private db: Database;
 
   constructor(dbPath?: string) {
-    const path = dbPath ?? process.env.EXCHANGE_DB ?? `${process.env.HOME}/.exchange/exchange.db`;
+    const path = dbPath ?? process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
     this.db = new Database(path);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA foreign_keys=ON;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  private migrate(): void {
+    // Add permanent column if missing (pre-v0.4.0 databases)
+    const cols = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "permanent")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   // --- Messages ---
@@ -230,16 +241,22 @@ export class Store {
     return this.db.prepare("SELECT * FROM agents").all() as Agent[];
   }
 
-  upsertAgent(agent: { id: string; display_name: string; pubkey: string }): void {
+  upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, created_at, last_seen_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO agents (id, display_name, pubkey, permanent, created_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
+        permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
         last_seen_at = excluded.last_seen_at
-    `).run(agent.id, agent.display_name, agent.pubkey, now, now);
+    `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, now, now);
+  }
+
+  isPermanent(agentId: string): boolean {
+    const row = this.db.prepare("SELECT permanent FROM agents WHERE id = ?").get(agentId) as { permanent: number } | null;
+    return row?.permanent === 1;
   }
 
   touchAgent(id: string): void {
@@ -367,26 +384,21 @@ export class Store {
   // --- Ephemeral agent cleanup ---
 
   /**
-   * Remove ephemeral agents: no active sessions, no messages sent/received
-   * in the given TTL window, and not in the permanent list.
+   * Remove ephemeral agents: not permanent, no active sessions,
+   * and not seen within the TTL window.
    */
-  reapEphemeralAgents(ttlMs: number, permanentAgents: string[]): string[] {
+  reapEphemeralAgents(ttlMs: number): string[] {
     const cutoff = Date.now() - ttlMs;
-    const placeholders = permanentAgents.map(() => "?").join(",");
 
-    // Find agents that:
-    // 1. Are not in the permanent list
-    // 2. Have no active (undisconnected) sessions
-    // 3. Haven't been seen since cutoff
     const candidates = this.db.prepare(`
       SELECT a.id FROM agents a
-      WHERE a.id NOT IN (${placeholders || "'__none__'"})
+      WHERE a.permanent = 0
         AND NOT EXISTS (
           SELECT 1 FROM agent_sessions s
           WHERE s.agent_id = a.id AND s.disconnected_at IS NULL
         )
         AND (a.last_seen_at IS NULL OR a.last_seen_at < ?)
-    `).all(...permanentAgents, cutoff) as { id: string }[];
+    `).all(cutoff) as { id: string }[];
 
     const reaped: string[] = [];
     for (const { id } of candidates) {

@@ -27,7 +27,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>The Exchange</title>
+  <title>The Wire</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -134,6 +134,28 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .key-output .key-val:hover { text-decoration: underline; }
     .key-output .warning { color: #f87171; font-size: 10px; margin-top: 8px; }
+    .tasks-list { margin-bottom: 8px; padding-left: 0; }
+    .tasks-list ol { margin: 0; padding-left: 24px; list-style: decimal; }
+    .tasks-list ol li { color: #525252; padding: 0; margin: 0; }
+    .task-row {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      padding: 6px 0;
+      border-bottom: 1px solid #141414;
+      cursor: pointer;
+    }
+    .task-row:hover { background: #111; }
+    .task-title { color: #e5e5e5; flex: 1; }
+    .task-owner { color: #6b7280; font-size: 11px; min-width: 80px; }
+    .task-status { font-size: 11px; min-width: 100px; text-align: right; }
+    .task-status.done { color: #4ade80; }
+    .task-status.in_progress, .task-status.code_complete { color: #fbbf24; }
+    .task-status.blocked { color: #f87171; }
+    .task-status.not_started, .task-status.ready { color: #6b7280; }
+    .task-status.planned { color: #a78bfa; }
+    .task-details { color: #525252; font-size: 11px; padding: 2px 0 4px 12px; display: none; }
+    .task-row.expanded + .task-details { display: block; }
     .stats {
       display: flex;
       gap: 32px;
@@ -152,7 +174,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 </head>
 <body>
   <header>
-    <h1>The Exchange <span>v0.3.0</span></h1>
+    <h1>The Wire <span>v0.3.0</span></h1>
     <div class="operator">${esc(operatorName)} · <a href="/auth/logout">logout</a></div>
   </header>
 
@@ -180,6 +202,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     </tbody>
   </table>
 
+  <div class="form-section" id="tasks-section">
+    <h2>Tasks</h2>
+    <div id="tasks-list" class="tasks-list">Loading...</div>
+  </div>
+
   <div class="form-section">
     <h2>Register Agent</h2>
     <div class="form-row">
@@ -198,11 +225,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     </div>
   </div>
 
-  <footer>The Exchange · agiterra · port ${process.env.EXCHANGE_PORT ?? "9800"}</footer>
+  <footer>The Wire · agiterra · port ${process.env.WIRE_PORT ?? "9800"}</footer>
 
   <script>
     // --- Live SSE updates ---
     const evtSource = new EventSource('/dashboard/stream');
+    evtSource.addEventListener('refresh', () => window.location.reload());
     evtSource.onmessage = (e) => {
       const agents = JSON.parse(e.data);
 
@@ -266,6 +294,44 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       document.getElementById('key-output').style.display = 'block';
     }
 
+    // --- Tasks ---
+    async function loadTasks() {
+      try {
+        const res = await fetch('/tasks');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderTasks(data);
+      } catch {}
+    }
+
+    function renderTasks(data) {
+      const el = document.getElementById('tasks-list');
+      if (!data.tasks || !data.tasks.length) {
+        el.innerHTML = '<span class="dim">No tasks</span>';
+        return;
+      }
+      el.innerHTML = '<ol>' + data.tasks.map(t => {
+        const statusLabel = (t.status || '').replace(/_/g, ' ');
+        const statusClass = t.status || 'not_started';
+        return '<li>' +
+          '<div class="task-row" onclick="this.classList.toggle(\\'expanded\\')">' +
+          '<span class="task-title">' + esc(t.title) + '</span>' +
+          '<span class="task-owner">' + esc(t.owner || '') + '</span>' +
+          '<span class="task-status ' + statusClass + '">' + esc(statusLabel) + '</span>' +
+          '</div>' +
+          '<div class="task-details">' + esc(t.details || '') + '</div>' +
+          '</li>';
+      }).join('') + '</ol>';
+    }
+
+    loadTasks();
+
+    // Live task updates via SSE
+    const taskStream = new EventSource('/tasks/stream');
+    taskStream.onmessage = (e) => {
+      try { renderTasks(JSON.parse(e.data)); } catch {}
+    };
+
     async function registerAgent() {
       const id = document.getElementById('new-agent-id').value.trim();
       const name = document.getElementById('new-agent-name').value.trim();
@@ -303,7 +369,7 @@ export function renderLogin(hasOwner: boolean): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>The Exchange — Login</title>
+  <title>The Wire — Login</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -357,7 +423,7 @@ export function renderLogin(hasOwner: boolean): string {
 </head>
 <body>
   <div class="card">
-    <h1>The Exchange</h1>
+    <h1>The Wire</h1>
     <p>${subtitle}</p>
     <div id="name-field">
       <input type="text" id="display-name" placeholder="Your name" autocomplete="name">
