@@ -134,6 +134,36 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .key-output .key-val:hover { text-decoration: underline; }
     .key-output .warning { color: #f87171; font-size: 10px; margin-top: 8px; }
+    #message-log {
+      max-height: 300px;
+      overflow-y: auto;
+      background: #111;
+      border: 1px solid #1f1f1f;
+      border-radius: 4px;
+      padding: 8px 12px;
+      margin-bottom: 24px;
+    }
+    #message-log:empty::after {
+      content: 'Waiting for messages…';
+      color: #3f3f46;
+    }
+    .msg-entry {
+      padding: 3px 0;
+      border-bottom: 1px solid #141414;
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }
+    .msg-entry:last-child { border-bottom: none; }
+    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; }
+    .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; }
+    .msg-source { color: #60a5fa; min-width: 100px; }
+    .msg-arrow { color: #3f3f46; }
+    .msg-dest { color: #a78bfa; min-width: 100px; }
+    .msg-topic { color: #fbbf24; flex: 1; }
+    .msg-delivery { font-size: 11px; }
+    .msg-delivery .ok { color: #4ade80; }
+    .msg-delivery .skip { color: #f87171; }
     .tasks-list { margin-bottom: 8px; padding-left: 0; }
     .tasks-list ol { margin: 0; padding-left: 24px; list-style: decimal; }
     .tasks-list ol li { color: #525252; padding: 0; margin: 0; }
@@ -202,6 +232,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     </tbody>
   </table>
 
+  <div class="form-section">
+    <h2>Message Log</h2>
+    <div id="message-log"></div>
+  </div>
+
   <div class="form-section" id="tasks-section">
     <h2>Tasks</h2>
     <div id="tasks-list" class="tasks-list">Loading...</div>
@@ -265,6 +300,33 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         el.onclick = () => copy(el.dataset.copy);
       });
     };
+
+    // --- Message log ---
+    evtSource.addEventListener('wire_message', (e) => {
+      const msg = JSON.parse(e.data);
+      const log = document.getElementById('message-log');
+      const ts = new Date(msg.created_at).toLocaleTimeString();
+      const deliveryBadges = (msg.deliveries || []).map(d =>
+        '<span class="' + (d.delivered ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
+      ).join(' ');
+
+      const entry = document.createElement('div');
+      entry.className = 'msg-entry';
+      entry.innerHTML =
+        '<span class="msg-ts">' + ts + '</span>' +
+        '<span class="msg-seq">#' + msg.seq + '</span>' +
+        '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
+        '<span class="msg-arrow">\u2192</span>' +
+        '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
+        '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
+        '<span class="msg-delivery">' + deliveryBadges + '</span>';
+
+      log.appendChild(entry);
+      log.scrollTop = log.scrollHeight;
+
+      // Cap at 100 entries
+      while (log.children.length > 100) log.removeChild(log.firstChild);
+    });
 
     function esc(s) {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';

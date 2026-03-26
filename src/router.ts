@@ -9,11 +9,20 @@
 import type { Store, Message } from "./store.js";
 import type { MessageEmitter } from "./emitter.js";
 
+export type RouteListener = (msg: Message, deliveries: { agentId: string; delivered: boolean }[]) => void;
+
 export class Router {
+  private routeListeners = new Set<RouteListener>();
+
   constructor(
     private store: Store,
     private emitter: MessageEmitter,
   ) {}
+
+  onRoute(listener: RouteListener): () => void {
+    this.routeListeners.add(listener);
+    return () => this.routeListeners.delete(listener);
+  }
 
   /**
    * Route a message: write to store, then push to matching subscribers.
@@ -34,6 +43,7 @@ export class Router {
     const subscribers = this.findSubscribers(stored);
 
     // 3. Attempt delivery to each connected subscriber
+    const deliveries: { agentId: string; delivered: boolean }[] = [];
     for (const agentId of subscribers) {
       const data = JSON.stringify({
         seq: stored.seq,
@@ -50,6 +60,12 @@ export class Router {
         agentId,
         delivered ? "ok" : "skipped_offline",
       );
+      deliveries.push({ agentId, delivered });
+    }
+
+    // Notify route listeners (dashboard, etc.)
+    for (const listener of this.routeListeners) {
+      try { listener(stored, deliveries); } catch {}
     }
 
     return stored;

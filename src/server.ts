@@ -589,6 +589,18 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
           // Poll every 3 seconds for changes
           const interval = setInterval(sendState, 3000);
 
+          // Live message log
+          const unsubRoute = router.onRoute((msg, deliveries) => {
+            write(`event: wire_message\ndata: ${JSON.stringify({
+              seq: msg.seq,
+              source: msg.source,
+              dest: msg.dest,
+              topic: msg.topic,
+              deliveries,
+              created_at: msg.created_at,
+            })}\n\n`);
+          });
+
           // Hot-reload: tell client to refresh when dashboard.ts changes
           const onRefresh = () => {
             write(`event: refresh\ndata: reload\n\n`);
@@ -597,6 +609,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
 
           c.req.raw.signal.addEventListener("abort", () => {
             clearInterval(interval);
+            unsubRoute();
             dashboardRefreshListeners.delete(onRefresh);
           });
         },
