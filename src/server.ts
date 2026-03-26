@@ -450,31 +450,35 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
       }
     }
 
-    // Build payload with envelope
+    // Build routed payload
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = rawBody; }
 
+    const vr = validatorResult as Record<string, unknown> | undefined;
+    const source = vr?.source as string
+      ?? (typeof parsedBody === "object" && parsedBody !== null && "source" in parsedBody
+        ? (parsedBody as Record<string, unknown>).source as string
+        : `webhook:${agentId}:${plugin}`);
+    const dest = vr?.dest as string ?? agentId;
+    const topic = vr?.topic as string
+      ?? (typeof parsedBody === "object" && parsedBody !== null && "topic" in parsedBody
+        ? (parsedBody as Record<string, unknown>).topic as string
+        : `webhook.${agentId}.${plugin}`);
+
+    // Envelope: routing metadata at top level, original body on payload
     const payload = {
+      from: source,
+      from_name: vr?.sender_display_name as string ?? source,
+      topic,
+      dest,
       plugin,
-      endpoint: `${agentId}/${plugin}`,
-      headers,
-      body: parsedBody,
-      ...(validatorResult ? { validator_result: validatorResult } : {}),
+      payload: parsedBody,
     };
 
-    // Route through store + emitter
-    // Prefer validator-provided routing (JWT claims) over body-based routing
-    const vr = validatorResult as Record<string, unknown> | undefined;
     const msg = router.route({
-      source: vr?.source as string
-        ?? (typeof parsedBody === "object" && parsedBody !== null && "source" in parsedBody
-          ? (parsedBody as Record<string, unknown>).source as string
-          : `webhook:${agentId}:${plugin}`),
-      dest: vr?.dest as string ?? agentId,
-      topic: vr?.topic as string
-        ?? (typeof parsedBody === "object" && parsedBody !== null && "topic" in parsedBody
-          ? (parsedBody as Record<string, unknown>).topic as string
-          : `webhook.${agentId}.${plugin}`),
+      source,
+      dest,
+      topic,
       payload: JSON.stringify(payload),
       raw: rawBody,
     });
@@ -597,11 +601,11 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
 
           // Live message log
           const unsubRoute = router.onRoute((msg, deliveries) => {
-            // Extract message body for display
+            // Extract message content for display
             let content: unknown;
             try {
               const envelope = JSON.parse(msg.payload);
-              content = envelope.body ?? msg.payload;
+              content = envelope.payload ?? msg.payload;
             } catch { content = msg.payload; }
             write(`event: wire_message\ndata: ${JSON.stringify({
               seq: msg.seq,
