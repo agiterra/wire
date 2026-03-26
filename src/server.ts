@@ -424,6 +424,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
 
     // Run validator if present
+    let validatorResult: unknown;
     if (webhook.validator) {
       try {
         const secretsMap = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
@@ -438,7 +439,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
           directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
         }
 
-        await runValidator(webhook.validator, {
+        validatorResult = await runValidator(webhook.validator, {
           headers,
           body: rawBody,
           secrets: resolvedSecrets,
@@ -458,17 +459,22 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
       endpoint: `${agentId}/${plugin}`,
       headers,
       body: parsedBody,
+      ...(validatorResult ? { validator_result: validatorResult } : {}),
     };
 
     // Route through store + emitter
+    // Prefer validator-provided routing (JWT claims) over body-based routing
+    const vr = validatorResult as Record<string, unknown> | undefined;
     const msg = router.route({
-      source: typeof parsedBody === "object" && parsedBody !== null && "source" in parsedBody
-        ? (parsedBody as Record<string, unknown>).source as string
-        : `webhook:${agentId}:${plugin}`,
-      dest: agentId,
-      topic: typeof parsedBody === "object" && parsedBody !== null && "topic" in parsedBody
-        ? (parsedBody as Record<string, unknown>).topic as string
-        : `webhook.${agentId}.${plugin}`,
+      source: vr?.source as string
+        ?? (typeof parsedBody === "object" && parsedBody !== null && "source" in parsedBody
+          ? (parsedBody as Record<string, unknown>).source as string
+          : `webhook:${agentId}:${plugin}`),
+      dest: vr?.dest as string ?? agentId,
+      topic: vr?.topic as string
+        ?? (typeof parsedBody === "object" && parsedBody !== null && "topic" in parsedBody
+          ? (parsedBody as Record<string, unknown>).topic as string
+          : `webhook.${agentId}.${plugin}`),
       payload: JSON.stringify(payload),
       raw: rawBody,
     });
@@ -591,11 +597,18 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
 
           // Live message log
           const unsubRoute = router.onRoute((msg, deliveries) => {
+            // Extract message body for display
+            let content: unknown;
+            try {
+              const envelope = JSON.parse(msg.payload);
+              content = envelope.body ?? msg.payload;
+            } catch { content = msg.payload; }
             write(`event: wire_message\ndata: ${JSON.stringify({
               seq: msg.seq,
               source: msg.source,
               dest: msg.dest,
               topic: msg.topic,
+              content,
               deliveries,
               created_at: msg.created_at,
             })}\n\n`);
@@ -729,7 +742,7 @@ async function runValidator(
     secrets: Record<string, string>;
     directory?: Record<string, { pubkey: string; display_name: string }>;
   },
-): Promise<void> {
+): Promise<unknown> {
   // Use AsyncFunction constructor for lightweight validation.
   // The validator runs in the same process — the trust model is
   // "operator trusts agent-provided code" (same as installing a plugin).
@@ -745,7 +758,7 @@ async function runValidator(
     code,
   );
   const rawBody = ctx.body;
-  await fn(ctx.headers, ctx.body, ctx.secrets, {
+  return await fn(ctx.headers, ctx.body, ctx.secrets, {
     subtle: crypto.subtle,
     createHmac: (algo: string, key: string) => {
       const encoder = new TextEncoder();

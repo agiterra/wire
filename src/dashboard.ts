@@ -164,6 +164,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .msg-delivery { font-size: 11px; }
     .msg-delivery .ok { color: #4ade80; }
     .msg-delivery .skip { color: #f87171; }
+    .msg-content { color: #525252; font-size: 11px; margin-top: 2px; word-break: break-all; }
     .tasks-list { margin-bottom: 8px; padding-left: 0; }
     .tasks-list ol { margin: 0; padding-left: 24px; list-style: decimal; }
     .tasks-list ol li { color: #525252; padding: 0; margin: 0; }
@@ -309,6 +310,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const deliveryBadges = (msg.deliveries || []).map(d =>
         '<span class="' + (d.delivered ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
       ).join(' ');
+      const contentStr = typeof msg.content === 'string'
+        ? msg.content
+        : JSON.stringify(msg.content);
+      const contentSnippet = contentStr.length > 120
+        ? contentStr.slice(0, 120) + '\u2026'
+        : contentStr;
 
       const entry = document.createElement('div');
       entry.className = 'msg-entry';
@@ -319,7 +326,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         '<span class="msg-arrow">\u2192</span>' +
         '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
         '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
-        '<span class="msg-delivery">' + deliveryBadges + '</span>';
+        '<span class="msg-delivery">' + deliveryBadges + '</span>' +
+        '<div class="msg-content">' + esc(contentSnippet) + '</div>';
 
       log.appendChild(entry);
       log.scrollTop = log.scrollHeight;
