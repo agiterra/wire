@@ -125,6 +125,7 @@ export type Message = {
   created_at: number;
   source: string;
   source_id: string | null;
+  source_cc_session: string | null;
   dest: string | null;
   topic: string;
   payload: string;
@@ -141,6 +142,8 @@ export type Agent = {
   plan: string | null;
 };
 
+export type SessionStatus = "connected" | "stale" | "reaped";
+
 export type AgentSession = {
   id: string;
   agent_id: string;
@@ -151,6 +154,8 @@ export type AgentSession = {
   last_ack_seq: number;
   updated_at: number;
   last_heartbeat: number | null;
+  status: SessionStatus;
+  cc_session_id: string | null;
 };
 
 export type Webhook = {
@@ -188,6 +193,24 @@ export class Store {
     if (!cols.some((c) => c.name === "permanent")) {
       this.db.exec("ALTER TABLE agents ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0");
     }
+
+    // Add status column to agent_sessions (session lifecycle spec)
+    const sessionCols = this.db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+    if (!sessionCols.some((c) => c.name === "status")) {
+      this.db.exec("ALTER TABLE agent_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'connected'");
+      this.db.exec("UPDATE agent_sessions SET status = 'reaped' WHERE disconnected_at IS NOT NULL");
+    }
+
+    // Add cc_session_id column — identifies the Claude Code session (survives SSE reconnects)
+    if (!sessionCols.some((c) => c.name === "cc_session_id")) {
+      this.db.exec("ALTER TABLE agent_sessions ADD COLUMN cc_session_id TEXT");
+    }
+
+    // Add source_cc_session to messages — sender's CC session for reply targeting
+    const msgCols = this.db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+    if (!msgCols.some((c) => c.name === "source_cc_session")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN source_cc_session TEXT");
+    }
   }
 
   // --- Messages ---
@@ -195,6 +218,7 @@ export class Store {
   writeMessage(msg: {
     source: string;
     source_id?: string;
+    source_cc_session?: string;
     dest?: string;
     topic: string;
     payload: string;
@@ -202,16 +226,17 @@ export class Store {
   }): Message {
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO messages (created_at, source, source_id, dest, topic, payload, raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (created_at, source, source_id, source_cc_session, dest, topic, payload, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(now, msg.source, msg.source_id ?? null, msg.dest ?? null, msg.topic, msg.payload, msg.raw ?? null);
+    stmt.run(now, msg.source, msg.source_id ?? null, msg.source_cc_session ?? null, msg.dest ?? null, msg.topic, msg.payload, msg.raw ?? null);
     const seq = this.db.prepare("SELECT last_insert_rowid() as seq").get() as { seq: number };
     return {
       seq: seq.seq,
       created_at: now,
       source: msg.source,
       source_id: msg.source_id ?? null,
+      source_cc_session: msg.source_cc_session ?? null,
       dest: msg.dest ?? null,
       topic: msg.topic,
       payload: msg.payload,
@@ -223,6 +248,12 @@ export class Store {
     return this.db.prepare(
       "SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?"
     ).all(sinceSeq, limit) as Message[];
+  }
+
+  getRecentMessagesByCount(limit = 50): Message[] {
+    return this.db.prepare(
+      "SELECT * FROM (SELECT * FROM messages ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    ).all(limit) as Message[];
   }
 
   getMessagesForAgent(agentId: string, sinceSeq: number, limit = 100): Message[] {
@@ -274,13 +305,13 @@ export class Store {
 
   // --- Sessions ---
 
-  createSession(agentId: string, runtime = "claude-code"): AgentSession {
+  createSession(agentId: string, runtime = "claude-code", contextId?: string): AgentSession {
     const id = crypto.randomUUID();
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agent_sessions (id, agent_id, runtime, connected_at, last_ack_seq, updated_at, last_heartbeat)
-      VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(last_ack_seq), 0) FROM agent_sessions WHERE agent_id = ?), ?, ?)
-    `).run(id, agentId, runtime, now, agentId, now, now);
+      INSERT INTO agent_sessions (id, agent_id, runtime, connected_at, last_ack_seq, updated_at, last_heartbeat, status, cc_session_id)
+      VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(last_ack_seq), 0) FROM agent_sessions WHERE agent_id = ?), ?, ?, 'connected', ?)
+    `).run(id, agentId, runtime, now, agentId, now, now, contextId ?? null);
     return this.getSession(id)!;
   }
 
@@ -290,14 +321,49 @@ export class Store {
 
   getActiveSessions(agentId: string): AgentSession[] {
     return this.db.prepare(
-      "SELECT * FROM agent_sessions WHERE agent_id = ? AND disconnected_at IS NULL"
+      "SELECT * FROM agent_sessions WHERE agent_id = ? AND status = 'connected'"
     ).all(agentId) as AgentSession[];
   }
 
+  getStaleSessions(agentId: string): AgentSession[] {
+    return this.db.prepare(
+      "SELECT * FROM agent_sessions WHERE agent_id = ? AND status = 'stale'"
+    ).all(agentId) as AgentSession[];
+  }
+
+  /** Mark session as disconnected (reaped). Used for explicit disconnect. */
   disconnectSession(id: string): void {
     this.db.prepare(
-      "UPDATE agent_sessions SET disconnected_at = ?, updated_at = ? WHERE id = ?"
+      "UPDATE agent_sessions SET disconnected_at = ?, updated_at = ?, status = 'reaped' WHERE id = ?"
     ).run(Date.now(), Date.now(), id);
+  }
+
+  /** SSE socket closed — mark stale (not yet reaped). */
+  markSessionStale(id: string): void {
+    this.db.prepare(
+      "UPDATE agent_sessions SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'connected'"
+    ).run(Date.now(), id);
+  }
+
+  /** Resurrect a reaped/stale session — reconnect with same cursor. */
+  resurrectSession(id: string): void {
+    this.db.prepare(
+      "UPDATE agent_sessions SET status = 'connected', disconnected_at = NULL, updated_at = ?, last_heartbeat = ? WHERE id = ?"
+    ).run(Date.now(), Date.now(), id);
+  }
+
+  /** Find a session to resurrect for an agent based on last_ack_seq. */
+  findResurrectableSession(agentId: string, lastAckSeq: number): AgentSession | null {
+    return (this.db.prepare(
+      "SELECT * FROM agent_sessions WHERE agent_id = ? AND status IN ('stale', 'reaped') AND last_ack_seq = ? ORDER BY updated_at DESC LIMIT 1"
+    ).get(agentId, lastAckSeq) as AgentSession) ?? null;
+  }
+
+  /** Get all connected session IDs for a given context. */
+  getSessionsByCCSession(agentId: string, contextId: string): AgentSession[] {
+    return this.db.prepare(
+      "SELECT * FROM agent_sessions WHERE agent_id = ? AND cc_session_id = ? AND status = 'connected'"
+    ).all(agentId, contextId) as AgentSession[];
   }
 
   ackSession(sessionId: string, seq: number): void {
@@ -312,24 +378,37 @@ export class Store {
     ).run(Date.now(), Date.now(), sessionId);
   }
 
-  /** True if agent has any active session with a heartbeat within ttlMs. */
-  hasRecentHeartbeat(agentId: string, ttlMs: number): boolean {
-    const cutoff = Date.now() - ttlMs;
+  /** True if agent has any connected session (SSE socket open). */
+  hasConnectedSession(agentId: string): boolean {
     const row = this.db.prepare(
-      "SELECT 1 FROM agent_sessions WHERE agent_id = ? AND disconnected_at IS NULL AND last_heartbeat > ? LIMIT 1"
-    ).get(agentId, cutoff);
+      "SELECT 1 FROM agent_sessions WHERE agent_id = ? AND status = 'connected' LIMIT 1"
+    ).get(agentId);
     return !!row;
   }
 
-  // Reaper: disconnect sessions with stale heartbeats
+  /**
+   * Reaper: reap sessions that have been stale longer than ttlMs.
+   * Stale = SSE socket closed. Reap timer gives them a grace period to reconnect.
+   */
   reapStaleSessions(ttlMs: number): number {
     const cutoff = Date.now() - ttlMs;
-    const result = this.db.prepare(`
+    const now = Date.now();
+    // Reap sessions marked stale past the TTL
+    const staleResult = this.db.prepare(`
       UPDATE agent_sessions
-      SET disconnected_at = ?, updated_at = ?
-      WHERE disconnected_at IS NULL AND last_heartbeat IS NOT NULL AND last_heartbeat < ?
-    `).run(Date.now(), Date.now(), cutoff);
-    return result.changes;
+      SET status = 'reaped', disconnected_at = ?, updated_at = ?
+      WHERE status = 'stale' AND updated_at < ?
+    `).run(now, now, cutoff);
+    // Also reap "connected" sessions with no heartbeat past 60s (3 missed
+    // heartbeats at 20s interval) — zombie sessions where the SSE abort
+    // never fired (process killed, machine sleep, network drop).
+    const zombieCutoff = Date.now() - 60_000;
+    const zombieResult = this.db.prepare(`
+      UPDATE agent_sessions
+      SET status = 'reaped', disconnected_at = ?, updated_at = ?
+      WHERE status = 'connected' AND last_heartbeat < ?
+    `).run(now, now, zombieCutoff);
+    return staleResult.changes + zombieResult.changes;
   }
 
   // --- Subscriptions ---
