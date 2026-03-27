@@ -6,6 +6,7 @@
  * The store is the primary path. Delivery is a side effect of storage.
  */
 
+import type { Logger } from "pino";
 import type { Store, Message } from "./store.js";
 import type { MessageEmitter } from "./emitter.js";
 
@@ -18,11 +19,15 @@ export type RouteListener = (msg: Message, deliveries: DeliveryResult[]) => void
 
 export class Router {
   private routeListeners = new Set<RouteListener>();
+  private log: Logger;
 
   constructor(
     private store: Store,
     private emitter: MessageEmitter,
-  ) {}
+    log: Logger,
+  ) {
+    this.log = log.child({ component: "router" });
+  }
 
   onRoute(listener: RouteListener): () => void {
     this.routeListeners.add(listener);
@@ -89,7 +94,7 @@ export class Router {
     // Notify route listeners (dashboard, etc.)
     for (const listener of this.routeListeners) {
       try { listener(stored, deliveries); } catch (e) {
-        console.error(`[router] route listener error:`, e);
+        this.log.error({ event: "listener_error", seq: stored.seq, err: e }, "route listener error");
       }
     }
 

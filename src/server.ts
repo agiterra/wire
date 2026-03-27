@@ -32,6 +32,7 @@ import {
   generateRegistrationOptions,
   generateAuthenticationOptions,
 } from "./auth.js";
+import type { Logger } from "pino";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -41,17 +42,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const dashboardPath = join(__dirname, "dashboard.ts");
 let _renderDashboard = _initialRenderDashboard;
 const dashboardRefreshListeners = new Set<() => void>();
+let _serverLog: Logger | null = null;
 
 async function reloadDashboard() {
   try {
     const mod = await import(`file://${dashboardPath}?v=${Date.now()}`);
     _renderDashboard = mod.renderDashboard;
-    console.error("[wire] dashboard reloaded");
+    _serverLog?.info({ event: "dashboard_reloaded" }, "dashboard reloaded");
     for (const listener of dashboardRefreshListeners) {
       listener();
     }
   } catch (e) {
-    console.error("[wire] dashboard reload failed:", e);
+    _serverLog?.error({ event: "dashboard_reload_failed", err: e }, "dashboard reload failed");
   }
 }
 watchFile(dashboardPath, { interval: 1000 }, () => reloadDashboard());
@@ -61,6 +63,7 @@ type ServerDeps = {
   store: Store;
   router: Router;
   emitter: MessageEmitter;
+  log: Logger;
 };
 
 // --- Ed25519 signature verification ---
@@ -83,7 +86,8 @@ async function verifyEd25519(pubkeyB64: string, signature: string, body: string)
   }
 }
 
-export function createServer({ port, store, router, emitter }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log }: ServerDeps) {
+  _serverLog = log;
   const app = new Hono();
 
   app.use("*", cors());
