@@ -24,7 +24,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Context } from "hono";
 import type { Store } from "./store.js";
-import type { Router, DeliveryResult } from "./router.js";
+import type { Router } from "./router.js";
 import type { MessageEmitter, SSEWriter } from "./emitter.js";
 import {
   getOperatorFromSession,
@@ -61,7 +61,6 @@ type ServerDeps = {
   store: Store;
   router: Router;
   emitter: MessageEmitter;
-  sessionTtlMs: number;
 };
 
 // --- Ed25519 signature verification ---
@@ -84,7 +83,7 @@ async function verifyEd25519(pubkeyB64: string, signature: string, body: string)
   }
 }
 
-export function createServer({ port, store, router, emitter, sessionTtlMs }: ServerDeps) {
+export function createServer({ port, store, router, emitter }: ServerDeps) {
   const app = new Hono();
 
   app.use("*", cors());
@@ -222,7 +221,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
     if (err) return err;
 
     // Don't kill existing sessions — they may be legitimate concurrent sessions.
-    // Stale sessions are handled by the SSE abort signal + reaper.
+    // Stale sessions are handled by the heartbeat reconciler.
 
     store.touchAgent(agent_id);
     // cc_session_id identifies the Claude Code session (survives SSE reconnects)
@@ -247,6 +246,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
     if (err) return err;
 
     store.disconnectSession(session_id);
+    emitter.closeAndUnregister(agent_id, session_id);
     return c.json({ disconnected: true });
   });
 
@@ -298,11 +298,8 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
       return c.json({ error: "invalid session" }, 403);
     }
 
-    // Resurrect stale/reaped session on SSE reconnect
-    const session = store.getSession(sessionId);
-    if (session && session.status !== "connected") {
-      store.resurrectSession(sessionId);
-    }
+    // Mark session connected on SSE open (handles reconnects from stale/disconnected)
+    store.markSessionConnected(sessionId);
 
     return new Response(
       new ReadableStream({
@@ -329,8 +326,9 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
           // Replay backlog
           router.replay(agentId, sessionId!);
 
-          // SSE socket closed → stop delivery. Heartbeat timeout
-          // handles reaping — no status change needed here.
+          // SSE socket closed → unregister writer only.
+          // Status transitions are handled by the reconciler (heartbeat timeout)
+          // or explicit disconnect endpoint. No status change here.
           c.req.raw.signal.addEventListener("abort", () => {
             emitter.unregister(agentId, sessionId!);
           });

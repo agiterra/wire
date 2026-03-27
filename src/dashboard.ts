@@ -7,17 +7,17 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   const agentRows = agents.map((a: any) => {
     const status = a.online ? "●" : "○";
     const statusColor = a.online ? "#4ade80" : "#6b7280";
-    const planSnippet = a.plan ? a.plan.slice(0, 80) + (a.plan.length > 80 ? "…" : "") : "—";
+    const planFull = a.plan ? esc(a.plan) : "";
     const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : "never";
     const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + "…" : "—";
     return `
-      <tr>
+      <tr class="agent-row" onclick="this.classList.toggle('expanded')">
         <td><span style="color:${statusColor}">${status}</span></td>
-        <td class="agent-name copyable" onclick="copy('${esc(a.id)}')" title="Click to copy">${esc(a.id)}</td>
+        <td class="agent-name copyable" onclick="event.stopPropagation();copy('${esc(a.id)}',this)" title="Click to copy">${esc(a.id)}</td>
         <td>${esc(a.display_name)}</td>
-        <td class="copyable" onclick="copy('${esc(a.pubkey)}')" title="Click to copy full pubkey">${pubkeyShort}</td>
+        <td class="copyable" onclick="event.stopPropagation();copy('${esc(a.pubkey)}',this)" title="Click to copy full pubkey">${pubkeyShort}</td>
         <td>${a.sessions}</td>
-        <td class="plan">${esc(planSnippet)}</td>
+        <td class="plan"><span class="plan-text">${planFull || "—"}</span></td>
         <td class="dim">${lastSeen}</td>
       </tr>`;
   }).join("\n");
@@ -59,7 +59,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       letter-spacing: 0.05em;
       margin-bottom: 8px;
     }
-    table { width: 100%; border-collapse: collapse; }
     th {
       text-align: left;
       color: #6b7280;
@@ -75,13 +74,44 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       border-bottom: 1px solid #141414;
       vertical-align: top;
     }
-    tr:hover { background: #111; }
+    .agent-row { cursor: pointer; }
+    .agent-row:hover { background: #111; }
     .agent-name { color: #60a5fa; font-weight: 500; }
-    .plan { color: #a1a1aa; max-width: 400px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    col.col-status { width: 24px; }
+    col.col-id { width: 90px; }
+    col.col-name { width: 80px; }
+    col.col-pubkey { width: 120px; }
+    col.col-sessions { width: 70px; }
+    col.col-plan { }
+    col.col-seen { width: 200px; }
+    td:last-child { white-space: nowrap; }
+    .plan { color: #a1a1aa; overflow: hidden; }
+    .plan-text {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .agent-row.expanded .plan-text {
+      white-space: pre-wrap;
+      overflow: visible;
+      text-overflow: unset;
+    }
     .dim { color: #525252; }
-    .copyable { cursor: pointer; }
+    .copyable { cursor: pointer; position: relative; }
     .copyable:hover { text-decoration: underline; }
     .copied { color: #4ade80 !important; }
+    .copy-toast {
+      position: absolute; top: -22px; left: 50%; transform: translateX(-50%);
+      background: #4ade80; color: #000; font-size: 10px; font-weight: 600;
+      padding: 2px 6px; border-radius: 3px; pointer-events: none;
+      animation: copy-fade 0.8s ease-out forwards;
+    }
+    @keyframes copy-fade {
+      0% { opacity: 1; transform: translateX(-50%) translateY(0); }
+      100% { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+    }
     .form-section {
       margin-top: 32px;
       padding-top: 16px;
@@ -135,36 +165,86 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .key-output .key-val:hover { text-decoration: underline; }
     .key-output .warning { color: #f87171; font-size: 10px; margin-top: 8px; }
     #message-log {
-      max-height: 300px;
+      max-height: 400px;
       overflow-y: auto;
       background: #111;
       border: 1px solid #1f1f1f;
       border-radius: 4px;
       padding: 8px 12px;
-      margin-bottom: 24px;
+      display: none;
     }
     #message-log:empty::after {
       content: 'Waiting for messages…';
       color: #3f3f46;
     }
+    .msg-log-header {
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .msg-log-header:hover h2 { color: #e5e5e5; }
+    .msg-log-toggle { color: #525252; font-size: 11px; transition: transform 0.15s; }
+    .msg-log-header.expanded .msg-log-toggle { transform: rotate(90deg); }
+    .msg-log-header.expanded + #message-log { display: block; }
+    .msg-log-count { color: #525252; font-size: 11px; font-weight: 400; }
     .msg-entry {
       padding: 3px 0;
       border-bottom: 1px solid #141414;
+      cursor: pointer;
+    }
+    .msg-entry:last-child { border-bottom: none; }
+    .msg-summary {
       display: flex;
       gap: 12px;
       align-items: baseline;
+      overflow: hidden;
+      white-space: nowrap;
     }
-    .msg-entry:last-child { border-bottom: none; }
-    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; }
-    .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; }
-    .msg-source { color: #60a5fa; min-width: 100px; }
-    .msg-arrow { color: #3f3f46; }
-    .msg-dest { color: #a78bfa; min-width: 100px; }
-    .msg-topic { color: #fbbf24; flex: 1; }
-    .msg-delivery { font-size: 11px; }
+    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; flex-shrink: 0; }
+    .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; flex-shrink: 0; }
+    .msg-source { color: #60a5fa; min-width: 80px; flex-shrink: 0; }
+    .msg-arrow { color: #3f3f46; flex-shrink: 0; }
+    .msg-dest { color: #a78bfa; min-width: 80px; flex-shrink: 0; }
+    .msg-topic { color: #fbbf24; flex-shrink: 0; }
+    .msg-delivery { font-size: 11px; flex-shrink: 0; }
     .msg-delivery .ok { color: #4ade80; }
     .msg-delivery .skip { color: #f87171; }
-    .msg-content { color: #525252; font-size: 11px; margin-top: 2px; word-break: break-all; }
+    .msg-snippet { color: #3f3f46; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-detail {
+      display: none;
+      margin: 4px 0 4px 92px;
+      padding: 6px 8px;
+      background: #0d0d0d;
+      border: 1px solid #1a1a1a;
+      border-radius: 3px;
+      font-size: 11px;
+      color: #a1a1aa;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .msg-entry.expanded .msg-detail { display: block; }
+    .json-tree { line-height: 1.5; }
+    .json-key { color: #60a5fa; }
+    .json-str { color: #4ade80; }
+    .json-num { color: #fbbf24; }
+    .json-bool { color: #f472b6; }
+    .json-null { color: #6b7280; }
+    .json-toggle {
+      cursor: pointer;
+      user-select: none;
+      color: #525252;
+      display: inline;
+    }
+    .json-toggle:hover { color: #a1a1aa; }
+    .json-toggle::before { content: '▶ '; font-size: 9px; display: inline-block; transition: transform 0.1s; }
+    .json-toggle.open::before { transform: rotate(90deg); }
+    .json-children { display: none; padding-left: 16px; }
+    .json-toggle.open + .json-children { display: block; }
+    .json-bracket { color: #525252; }
+    .json-comma { color: #525252; }
+    .json-preview { color: #3f3f46; }
     .tasks-list { margin-bottom: 8px; padding-left: 0; }
     .tasks-list ol { margin: 0; padding-left: 24px; list-style: decimal; }
     .tasks-list ol li { color: #525252; padding: 0; margin: 0; }
@@ -217,6 +297,15 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
   <h2>Agent Registry</h2>
   <table>
+    <colgroup>
+      <col class="col-status">
+      <col class="col-id">
+      <col class="col-name">
+      <col class="col-pubkey">
+      <col class="col-sessions">
+      <col class="col-plan">
+      <col class="col-seen">
+    </colgroup>
     <thead>
       <tr>
         <th></th>
@@ -234,12 +323,21 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   </table>
 
   <div class="form-section">
-    <h2>Message Log</h2>
+    <div class="msg-log-header" id="msg-log-header" onclick="this.classList.toggle('expanded')">
+      <span class="msg-log-toggle">▶</span>
+      <h2>Message Log</h2>
+      <span class="msg-log-count" id="msg-log-count"></span>
+    </div>
     <div id="message-log"></div>
   </div>
 
   <div class="form-section" id="tasks-section">
-    <h2>Tasks</h2>
+    <div style="display:flex;align-items:center;gap:12px">
+      <h2>Tasks</h2>
+      <label style="font-size:11px;color:#6b7280;cursor:pointer;user-select:none">
+        <input type="checkbox" id="show-done" style="margin-right:4px"> Show done
+      </label>
+    </div>
     <div id="tasks-list" class="tasks-list">Loading...</div>
   </div>
 
@@ -277,49 +375,67 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         '<div><span class="stat-value">' + agents.reduce((n, a) => n + a.sessions, 0) + '</span> sessions</div>',
       ].join('');
 
-      // Update table body
+      // Update table body — preserve expanded state
       const tbody = document.querySelector('tbody');
+      const expandedIds = new Set();
+      tbody.querySelectorAll('.agent-row.expanded').forEach(el => {
+        const name = el.querySelector('.agent-name');
+        if (name) expandedIds.add(name.textContent);
+      });
       tbody.innerHTML = agents.map(a => {
         const status = a.online ? '●' : '○';
         const statusColor = a.online ? '#4ade80' : '#6b7280';
-        const planSnippet = a.plan ? a.plan.slice(0, 80) + (a.plan.length > 80 ? '…' : '') : '—';
+        const planFull = a.plan ? esc(a.plan) : '';
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : 'never';
         const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + '…' : '—';
-        return '<tr>' +
+        const expanded = expandedIds.has(a.id) ? ' expanded' : '';
+        return '<tr class="agent-row' + expanded + '" onclick="this.classList.toggle(&quot;expanded&quot;)">' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy">' + esc(a.id) + '</td>' +
+          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy" onclick="event.stopPropagation()">' + esc(a.id) + '</td>' +
           '<td>' + esc(a.display_name) + '</td>' +
-          '<td class="copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full pubkey">' + pubkeyShort + '</td>' +
+          '<td class="copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full pubkey" onclick="event.stopPropagation()">' + pubkeyShort + '</td>' +
           '<td>' + a.sessions + '</td>' +
-          '<td class="plan">' + esc(planSnippet) + '</td>' +
+          '<td class="plan"><span class="plan-text">' + (planFull || '—') + '</span></td>' +
           '<td class="dim">' + lastSeen + '</td>' +
           '</tr>';
       }).join('');
 
       // Re-bind click handlers via delegation
       tbody.querySelectorAll('[data-copy]').forEach(el => {
-        el.onclick = () => copy(el.dataset.copy);
+        el.onclick = (e) => { e.stopPropagation(); copy(el.dataset.copy, el); };
       });
     };
 
     // --- Message log ---
-    evtSource.addEventListener('wire_message', (e) => {
-      const msg = JSON.parse(e.data);
+    let msgCount = 0;
+    function addMessageEntry(msg) {
       const log = document.getElementById('message-log');
       const ts = new Date(msg.created_at).toLocaleTimeString();
       const deliveryBadges = (msg.deliveries || []).map(d =>
-        '<span class="' + (d.delivered ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
+        '<span class="' + (d.status === 'delivered' ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
       ).join(' ');
-      const contentStr = typeof msg.content === 'string'
-        ? msg.content
-        : JSON.stringify(msg.content);
-      const contentSnippet = contentStr.length > 120
-        ? contentStr.slice(0, 120) + '\u2026'
-        : contentStr;
+
+      // Unwrap stringified JSON
+      let parsed = msg.content;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch {}
+      }
+      // Single-line snippet for collapsed view
+      const snippet = typeof parsed === 'string'
+        ? parsed
+        : JSON.stringify(parsed);
+      const shortSnippet = snippet.length > 80 ? snippet.slice(0, 80) + '\u2026' : snippet;
 
       const entry = document.createElement('div');
       entry.className = 'msg-entry';
-      entry.innerHTML =
+      entry.onclick = (ev) => {
+        if (ev.target.closest('.msg-detail') || ev.target.closest('.json-toggle')) return;
+        entry.classList.toggle('expanded');
+      };
+
+      const summary = document.createElement('div');
+      summary.className = 'msg-summary';
+      summary.innerHTML =
         '<span class="msg-ts">' + ts + '</span>' +
         '<span class="msg-seq">#' + msg.seq + '</span>' +
         '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
@@ -327,26 +443,150 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
         '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
         '<span class="msg-delivery">' + deliveryBadges + '</span>' +
-        '<div class="msg-content">' + esc(contentSnippet) + '</div>';
+        '<span class="msg-snippet">' + esc(shortSnippet) + '</span>';
+
+      const detail = document.createElement('div');
+      detail.className = 'msg-detail json-tree';
+      detail.appendChild(renderJson(parsed, 0));
+
+      entry.appendChild(summary);
+      entry.appendChild(detail);
 
       log.appendChild(entry);
       log.scrollTop = log.scrollHeight;
+      msgCount++;
+      document.getElementById('msg-log-count').textContent = '(' + msgCount + ')';
 
-      // Cap at 100 entries
-      while (log.children.length > 100) log.removeChild(log.firstChild);
+      // Cap at 200 entries
+      while (log.children.length > 200) { log.removeChild(log.firstChild); msgCount--; }
+    }
+
+    // SSE live messages
+    evtSource.addEventListener('wire_message', (e) => {
+      addMessageEntry(JSON.parse(e.data));
     });
+
+    // Backfill recent messages via REST
+    fetch('/messages/recent?limit=50').then(r => r.json()).then(messages => {
+      for (const msg of messages) addMessageEntry(msg);
+    }).catch(() => {});
 
     function esc(s) {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
     }
 
-    function copy(text) {
+    function renderJson(val, depth) {
+      const frag = document.createDocumentFragment();
+      if (val === null) {
+        const s = document.createElement('span');
+        s.className = 'json-null';
+        s.textContent = 'null';
+        frag.appendChild(s);
+      } else if (typeof val === 'boolean') {
+        const s = document.createElement('span');
+        s.className = 'json-bool';
+        s.textContent = String(val);
+        frag.appendChild(s);
+      } else if (typeof val === 'number') {
+        const s = document.createElement('span');
+        s.className = 'json-num';
+        s.textContent = String(val);
+        frag.appendChild(s);
+      } else if (typeof val === 'string') {
+        // Try to unwrap nested stringified JSON
+        let inner = null;
+        if (val.length > 2 && (val[0] === '{' || val[0] === '[')) {
+          try { inner = JSON.parse(val); } catch {}
+        }
+        if (inner !== null && typeof inner === 'object') {
+          return renderJson(inner, depth);
+        }
+        const s = document.createElement('span');
+        s.className = 'json-str';
+        s.textContent = JSON.stringify(val);
+        frag.appendChild(s);
+      } else if (Array.isArray(val)) {
+        if (val.length === 0) {
+          const s = document.createElement('span');
+          s.className = 'json-bracket';
+          s.textContent = '[]';
+          frag.appendChild(s);
+        } else {
+          const isOpen = depth === 0;
+          const toggle = document.createElement('span');
+          toggle.className = 'json-toggle' + (isOpen ? ' open' : '');
+          const preview = document.createElement('span');
+          preview.className = 'json-preview';
+          preview.textContent = 'Array(' + val.length + ')';
+          toggle.appendChild(preview);
+          toggle.onclick = (e) => { e.stopPropagation(); toggle.classList.toggle('open'); };
+          frag.appendChild(toggle);
+          const children = document.createElement('div');
+          children.className = 'json-children';
+          val.forEach((item, i) => {
+            const row = document.createElement('div');
+            row.appendChild(renderJson(item, depth + 1));
+            if (i < val.length - 1) {
+              const comma = document.createElement('span');
+              comma.className = 'json-comma';
+              comma.textContent = ',';
+              row.appendChild(comma);
+            }
+            children.appendChild(row);
+          });
+          frag.appendChild(children);
+        }
+      } else if (typeof val === 'object') {
+        const keys = Object.keys(val);
+        if (keys.length === 0) {
+          const s = document.createElement('span');
+          s.className = 'json-bracket';
+          s.textContent = '{}';
+          frag.appendChild(s);
+        } else {
+          const isOpen = depth === 0;
+          const toggle = document.createElement('span');
+          toggle.className = 'json-toggle' + (isOpen ? ' open' : '');
+          const preview = document.createElement('span');
+          preview.className = 'json-preview';
+          preview.textContent = '{' + keys.slice(0, 3).join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
+          toggle.appendChild(preview);
+          toggle.onclick = (e) => { e.stopPropagation(); toggle.classList.toggle('open'); };
+          frag.appendChild(toggle);
+          const children = document.createElement('div');
+          children.className = 'json-children';
+          keys.forEach((k, i) => {
+            const row = document.createElement('div');
+            const key = document.createElement('span');
+            key.className = 'json-key';
+            key.textContent = JSON.stringify(k);
+            row.appendChild(key);
+            row.appendChild(document.createTextNode(': '));
+            row.appendChild(renderJson(val[k], depth + 1));
+            if (i < keys.length - 1) {
+              const comma = document.createElement('span');
+              comma.className = 'json-comma';
+              comma.textContent = ',';
+              row.appendChild(comma);
+            }
+            children.appendChild(row);
+          });
+          frag.appendChild(children);
+        }
+      }
+      return frag;
+    }
+
+    function copy(text, srcEl) {
       navigator.clipboard.writeText(text).then(() => {
-        // Brief flash
-        const el = event?.target;
+        const el = srcEl || event?.target?.closest('.copyable') || event?.target;
         if (el) {
           el.classList.add('copied');
-          setTimeout(() => el.classList.remove('copied'), 600);
+          const toast = document.createElement('span');
+          toast.className = 'copy-toast';
+          toast.textContent = 'Copied!';
+          el.appendChild(toast);
+          setTimeout(() => { el.classList.remove('copied'); toast.remove(); }, 800);
         }
       });
     }
@@ -374,13 +614,18 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       } catch {}
     }
 
+    let lastTaskData = null;
     function renderTasks(data) {
+      lastTaskData = data;
       const el = document.getElementById('tasks-list');
-      if (!data.tasks || !data.tasks.length) {
-        el.innerHTML = '<span class="dim">No tasks</span>';
+      const showDone = document.getElementById('show-done').checked;
+      const tasks = (data.tasks || []).filter(t => showDone || t.status !== 'done');
+      if (!tasks.length) {
+        const hidden = (data.tasks || []).length - tasks.length;
+        el.innerHTML = '<span class="dim">No tasks' + (hidden ? ' (' + hidden + ' done)' : '') + '</span>';
         return;
       }
-      el.innerHTML = '<ol>' + data.tasks.map(t => {
+      el.innerHTML = '<ol>' + tasks.map(t => {
         const statusLabel = (t.status || '').replace(/_/g, ' ');
         const statusClass = t.status || 'not_started';
         return '<li>' +
@@ -394,6 +639,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       }).join('') + '</ol>';
     }
 
+    document.getElementById('show-done').onchange = () => { if (lastTaskData) renderTasks(lastTaskData); };
     loadTasks();
 
     // Live task updates via SSE

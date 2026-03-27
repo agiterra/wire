@@ -142,7 +142,7 @@ export type Agent = {
   plan: string | null;
 };
 
-export type SessionStatus = "connected" | "stale" | "reaped";
+export type SessionStatus = "connected" | "stale" | "disconnected";
 
 export type AgentSession = {
   id: string;
@@ -198,8 +198,10 @@ export class Store {
     const sessionCols = this.db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
     if (!sessionCols.some((c) => c.name === "status")) {
       this.db.exec("ALTER TABLE agent_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'connected'");
-      this.db.exec("UPDATE agent_sessions SET status = 'reaped' WHERE disconnected_at IS NOT NULL");
+      this.db.exec("UPDATE agent_sessions SET status = 'disconnected' WHERE disconnected_at IS NOT NULL");
     }
+    // Migrate old "reaped" status to "disconnected"
+    this.db.exec("UPDATE agent_sessions SET status = 'disconnected' WHERE status = 'reaped'");
 
     // Add cc_session_id column — identifies the Claude Code session (survives SSE reconnects)
     if (!sessionCols.some((c) => c.name === "cc_session_id")) {
@@ -331,32 +333,20 @@ export class Store {
     ).all(agentId) as AgentSession[];
   }
 
-  /** Mark session as disconnected (reaped). Used for explicit disconnect. */
+  /** Explicit disconnect — intentional close by the agent. */
   disconnectSession(id: string): void {
+    const now = Date.now();
     this.db.prepare(
-      "UPDATE agent_sessions SET disconnected_at = ?, updated_at = ?, status = 'reaped' WHERE id = ?"
-    ).run(Date.now(), Date.now(), id);
+      "UPDATE agent_sessions SET disconnected_at = ?, updated_at = ?, status = 'disconnected' WHERE id = ?"
+    ).run(now, now, id);
   }
 
-  /** SSE socket closed — mark stale (not yet reaped). */
-  markSessionStale(id: string): void {
-    this.db.prepare(
-      "UPDATE agent_sessions SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'connected'"
-    ).run(Date.now(), id);
-  }
-
-  /** Resurrect a reaped/stale session — reconnect with same cursor. */
-  resurrectSession(id: string): void {
+  /** Mark session as connected (SSE stream opened/reconnected). */
+  markSessionConnected(id: string): void {
+    const now = Date.now();
     this.db.prepare(
       "UPDATE agent_sessions SET status = 'connected', disconnected_at = NULL, updated_at = ?, last_heartbeat = ? WHERE id = ?"
-    ).run(Date.now(), Date.now(), id);
-  }
-
-  /** Find a session to resurrect for an agent based on last_ack_seq. */
-  findResurrectableSession(agentId: string, lastAckSeq: number): AgentSession | null {
-    return (this.db.prepare(
-      "SELECT * FROM agent_sessions WHERE agent_id = ? AND status IN ('stale', 'reaped') AND last_ack_seq = ? ORDER BY updated_at DESC LIMIT 1"
-    ).get(agentId, lastAckSeq) as AgentSession) ?? null;
+    ).run(now, now, id);
   }
 
   /** Get all connected session IDs for a given context. */
@@ -387,20 +377,38 @@ export class Store {
   }
 
   /**
-   * Reaper: reap sessions that have been stale longer than ttlMs.
-   * Stale = SSE socket closed. Reap timer gives them a grace period to reconnect.
+   * Reconcile session status based on heartbeat age.
+   * - connected → stale: no heartbeat for staleMs
+   * - stale → disconnected: no heartbeat for disconnectMs
+   * Returns transitions so the caller can clean up emitters/writers.
    */
-  reapDeadSessions(ttlMs: number): number {
-    const cutoff = Date.now() - ttlMs;
+  reconcileSessions(staleMs: number, disconnectMs: number): { sessionId: string; agentId: string; newStatus: SessionStatus }[] {
     const now = Date.now();
-    // Reap any non-reaped session with no heartbeat past the TTL.
-    // No intermediate "stale" state — heartbeat timeout is the only signal.
-    const result = this.db.prepare(`
-      UPDATE agent_sessions
-      SET status = 'reaped', disconnected_at = ?, updated_at = ?
-      WHERE status <> 'reaped' AND last_heartbeat < ?
-    `).run(now, now, cutoff);
-    return result.changes;
+    const staleCutoff = now - staleMs;
+    const disconnectCutoff = now - disconnectMs;
+    const transitions: { sessionId: string; agentId: string; newStatus: SessionStatus }[] = [];
+
+    // First: connected → stale (missed one heartbeat)
+    const staleRows = this.db.prepare(
+      "SELECT id, agent_id FROM agent_sessions WHERE status = 'connected' AND last_heartbeat < ?"
+    ).all(staleCutoff) as { id: string; agent_id: string }[];
+    for (const row of staleRows) {
+      this.db.prepare("UPDATE agent_sessions SET status = 'stale', updated_at = ? WHERE id = ?").run(now, row.id);
+      transitions.push({ sessionId: row.id, agentId: row.agent_id, newStatus: "stale" });
+    }
+
+    // Second: stale → disconnected (missed heartbeats for 60s)
+    const disconnectRows = this.db.prepare(
+      "SELECT id, agent_id FROM agent_sessions WHERE status = 'stale' AND last_heartbeat < ?"
+    ).all(disconnectCutoff) as { id: string; agent_id: string }[];
+    for (const row of disconnectRows) {
+      this.db.prepare(
+        "UPDATE agent_sessions SET status = 'disconnected', disconnected_at = ?, updated_at = ? WHERE id = ?"
+      ).run(now, now, row.id);
+      transitions.push({ sessionId: row.id, agentId: row.agent_id, newStatus: "disconnected" });
+    }
+
+    return transitions;
   }
 
   // --- Subscriptions ---
@@ -464,10 +472,10 @@ export class Store {
   // --- Ephemeral agent cleanup ---
 
   /**
-   * Remove ephemeral agents: not permanent, no active sessions,
+   * Clean up ephemeral agents: not permanent, no active sessions,
    * and not seen within the TTL window.
    */
-  reapEphemeralAgents(ttlMs: number): string[] {
+  cleanEphemeralAgents(ttlMs: number): string[] {
     const cutoff = Date.now() - ttlMs;
 
     const candidates = this.db.prepare(`
@@ -480,15 +488,15 @@ export class Store {
         AND (a.last_seen_at IS NULL OR a.last_seen_at < ?)
     `).all(cutoff) as { id: string }[];
 
-    const reaped: string[] = [];
+    const removed: string[] = [];
     for (const { id } of candidates) {
       this.db.prepare("DELETE FROM subscriptions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
-      reaped.push(id);
+      removed.push(id);
     }
-    return reaped;
+    return removed;
   }
 
   // --- Operators ---
