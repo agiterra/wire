@@ -11,8 +11,9 @@ import { createServer } from "./server.js";
 
 const port = parseInt(process.env.WIRE_PORT ?? "9800", 10);
 const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
-const sessionTtlMs = parseInt(process.env.SESSION_TTL_MS ?? "300000", 10); // 5 min default
-const reaperIntervalMs = parseInt(process.env.REAPER_INTERVAL_MS ?? "60000", 10); // 1 min default
+// No heartbeat for 30s → reaped (heartbeats sent every 20s)
+const sessionTtlMs = parseInt(process.env.SESSION_TTL_MS ?? "30000", 10);
+const reaperIntervalMs = parseInt(process.env.REAPER_INTERVAL_MS ?? "10000", 10); // 10s sweep
 const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "3600000", 10); // 1 hour default
 
 const store = new Store(dbPath);
@@ -20,11 +21,11 @@ const emitter = new MessageEmitter();
 const router = new Router(store, emitter);
 const server = createServer({ port, store, router, emitter, sessionTtlMs });
 
-// Session reaper — disconnect stale sessions
+// Session reaper — reap sessions with no heartbeat past TTL
 setInterval(() => {
-  const sessionReaped = store.reapStaleSessions(sessionTtlMs);
+  const sessionReaped = store.reapDeadSessions(sessionTtlMs);
   if (sessionReaped > 0) {
-    console.log(`[reaper] disconnected ${sessionReaped} stale session(s)`);
+    console.log(`[reaper] reaped ${sessionReaped} stale session(s)`);
   }
 
   const agentReaped = store.reapEphemeralAgents(ephemeralTtlMs);

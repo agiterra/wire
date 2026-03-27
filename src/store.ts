@@ -390,25 +390,17 @@ export class Store {
    * Reaper: reap sessions that have been stale longer than ttlMs.
    * Stale = SSE socket closed. Reap timer gives them a grace period to reconnect.
    */
-  reapStaleSessions(ttlMs: number): number {
+  reapDeadSessions(ttlMs: number): number {
     const cutoff = Date.now() - ttlMs;
     const now = Date.now();
-    // Reap sessions marked stale past the TTL
-    const staleResult = this.db.prepare(`
+    // Reap any non-reaped session with no heartbeat past the TTL.
+    // No intermediate "stale" state — heartbeat timeout is the only signal.
+    const result = this.db.prepare(`
       UPDATE agent_sessions
       SET status = 'reaped', disconnected_at = ?, updated_at = ?
-      WHERE status = 'stale' AND updated_at < ?
+      WHERE status <> 'reaped' AND last_heartbeat < ?
     `).run(now, now, cutoff);
-    // Also reap "connected" sessions with no heartbeat past 60s (3 missed
-    // heartbeats at 20s interval) — zombie sessions where the SSE abort
-    // never fired (process killed, machine sleep, network drop).
-    const zombieCutoff = Date.now() - 60_000;
-    const zombieResult = this.db.prepare(`
-      UPDATE agent_sessions
-      SET status = 'reaped', disconnected_at = ?, updated_at = ?
-      WHERE status = 'connected' AND last_heartbeat < ?
-    `).run(now, now, zombieCutoff);
-    return staleResult.changes + zombieResult.changes;
+    return result.changes;
   }
 
   // --- Subscriptions ---

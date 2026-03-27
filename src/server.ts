@@ -22,9 +22,9 @@ import { homedir } from "os";
 import { join } from "path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Context, Next } from "hono";
+import type { Context } from "hono";
 import type { Store } from "./store.js";
-import type { Router } from "./router.js";
+import type { Router, DeliveryResult } from "./router.js";
 import type { MessageEmitter, SSEWriter } from "./emitter.js";
 import {
   getOperatorFromSession,
@@ -170,7 +170,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
     const agents = store.getAllAgents();
     const result = agents.map((a) => ({
       ...a,
-      online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
+      online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
       sessions: store.getActiveSessions(a.id).length,
     }));
     return c.json(result);
@@ -221,17 +221,16 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
     const err = await requireAgent(c, agent_id);
     if (err) return err;
 
-    // Disconnect any prior active sessions for this agent
-    const stale = store.getActiveSessions(agent_id);
-    for (const s of stale) {
-      store.disconnectSession(s.id);
-    }
+    // Don't kill existing sessions — they may be legitimate concurrent sessions.
+    // Stale sessions are handled by the SSE abort signal + reaper.
 
     store.touchAgent(agent_id);
-    const session = store.createSession(agent_id);
+    // cc_session_id identifies the Claude Code session (survives SSE reconnects)
+    const session = store.createSession(agent_id, "claude-code", body.cc_session_id);
 
     return c.json({
       session_id: session.id,
+      cc_session_id: session.cc_session_id,
       last_ack_seq: session.last_ack_seq,
     });
   });
@@ -299,6 +298,12 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
       return c.json({ error: "invalid session" }, 403);
     }
 
+    // Resurrect stale/reaped session on SSE reconnect
+    const session = store.getSession(sessionId);
+    if (session && session.status !== "connected") {
+      store.resurrectSession(sessionId);
+    }
+
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -308,7 +313,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
               try {
                 controller.enqueue(encoder.encode(data));
               } catch {
-                emitter.unregister(agentId, writer);
+                emitter.unregister(agentId, sessionId!);
               }
             },
             close() {
@@ -316,19 +321,18 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
             },
           };
 
-          emitter.register(agentId, writer);
+          emitter.register(agentId, sessionId!, writer);
 
           // Send keepalive comment
           writer.write(": connected\n\n");
 
           // Replay backlog
-          if (sessionId) {
-            router.replay(agentId, sessionId);
-          }
+          router.replay(agentId, sessionId!);
 
-          // Handle client disconnect
+          // SSE socket closed → stop delivery. Heartbeat timeout
+          // handles reaping — no status change needed here.
           c.req.raw.signal.addEventListener("abort", () => {
-            emitter.unregister(agentId, writer);
+            emitter.unregister(agentId, sessionId!);
           });
         },
       }),
@@ -475,15 +479,32 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
       payload: parsedBody,
     };
 
-    const msg = router.route({
+    // dest_cc_session targets a specific Claude Code session
+    const destCCSession = vr?.dest_cc_session as string | undefined
+      ?? (typeof parsedBody === "object" && parsedBody !== null && "dest_cc_session" in parsedBody
+        ? (parsedBody as Record<string, unknown>).dest_cc_session as string
+        : undefined);
+
+    // Sender's context — from validator result, request body, or look up from active sessions
+    const sourceCCSession = vr?.source_cc_session as string | undefined
+      ?? (typeof parsedBody === "object" && parsedBody !== null && "source_cc_session" in parsedBody
+        ? (parsedBody as Record<string, unknown>).source_cc_session as string
+        : undefined);
+
+    const { message, deliveries } = router.route({
       source,
+      source_cc_session: sourceCCSession,
       dest,
+      dest_cc_session: destCCSession,
       topic,
       payload: JSON.stringify(payload),
       raw: rawBody,
     });
 
-    return c.json({ seq: msg.seq });
+    return c.json({
+      seq: message.seq,
+      delivered_to: deliveries,
+    });
   });
 
   // --- Dashboard ---
@@ -501,11 +522,38 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
 
     const agents = store.getAllAgents().map((a) => ({
       ...a,
-      online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
+      online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
       sessions: store.getActiveSessions(a.id).length,
     }));
 
     return c.html(_renderDashboard(agents, operator.display_name));
+  });
+
+  // --- Recent messages endpoint (for dashboard backfill) ---
+
+  app.get("/messages/recent", (c) => {
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    if (!operatorId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const limit = parseInt(c.req.query("limit") ?? "50", 10);
+    const messages = store.getRecentMessagesByCount(limit).map((msg) => {
+      let content: unknown;
+      try {
+        const envelope = JSON.parse(msg.payload);
+        content = envelope.payload ?? msg.payload;
+      } catch { content = msg.payload; }
+      return {
+        seq: msg.seq,
+        source: msg.source,
+        dest: msg.dest,
+        topic: msg.topic,
+        content,
+        deliveries: [],
+        created_at: msg.created_at,
+      };
+    });
+    return c.json(messages);
   });
 
   // --- Tasks endpoint ---
@@ -588,7 +636,7 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
           const sendState = () => {
             const agents = store.getAllAgents().map((a) => ({
               ...a,
-              online: emitter.isConnected(a.id) || store.hasRecentHeartbeat(a.id, sessionTtlMs),
+              online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
               sessions: store.getActiveSessions(a.id).length,
             }));
             write(`data: ${JSON.stringify(agents)}\n\n`);
@@ -599,9 +647,8 @@ export function createServer({ port, store, router, emitter, sessionTtlMs }: Ser
           // Poll every 3 seconds for changes
           const interval = setInterval(sendState, 3000);
 
-          // Live message log
+          // Live message log (backfill handled client-side via /messages/recent)
           const unsubRoute = router.onRoute((msg, deliveries) => {
-            // Extract message content for display
             let content: unknown;
             try {
               const envelope = JSON.parse(msg.payload);
