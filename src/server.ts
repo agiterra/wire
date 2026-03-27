@@ -86,6 +86,68 @@ async function verifyEd25519(pubkeyB64: string, signature: string, body: string)
   }
 }
 
+// --- JWT default webhook validator ---
+
+function b64urlDecode(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+type JwtValidatorResult = {
+  source: string;
+  sender_display_name: string;
+  topic: string;
+};
+
+/**
+ * Default webhook validator — verifies JWT Bearer token with Ed25519 signature.
+ * Checks: sender identity (iss), signature, body hash integrity.
+ * Returns routing info (source, topic) extracted from verified claims.
+ */
+async function verifyJwtSender(
+  headers: Record<string, string>,
+  rawBody: string,
+  store: Store,
+): Promise<JwtValidatorResult> {
+  const authHeader = headers["authorization"] ?? "";
+  if (!authHeader.startsWith("Bearer ")) {
+    throw new Error("missing bearer token");
+  }
+  const token = authHeader.slice(7);
+
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("invalid JWT: expected 3 parts");
+  const [headerB64, payloadB64, sigB64] = parts;
+
+  // Decode claims
+  const claims = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64)));
+  const sender = claims.iss;
+  if (!sender) throw new Error("missing iss claim");
+
+  // Look up sender in agent directory
+  const agent = store.getAgent(sender);
+  if (!agent) throw new Error(`unknown sender: ${sender}`);
+
+  // Verify Ed25519 signature
+  const pubBytes = Uint8Array.from(atob(agent.pubkey), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", pubBytes, "Ed25519", false, ["verify"]);
+  const sigBytes = b64urlDecode(sigB64);
+  const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const valid = await crypto.subtle.verify("Ed25519", key, sigBytes, signingInput);
+  if (!valid) throw new Error("invalid JWT signature");
+
+  // Verify body hash
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
+  const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (bodyHash !== claims.body_hash) throw new Error("body hash mismatch");
+
+  return {
+    source: sender,
+    sender_display_name: agent.display_name,
+    topic: claims.topic ?? "ipc",
+  };
+}
+
 export function createServer({ port, store, router, emitter, log }: ServerDeps) {
   _serverLog = log;
   const app = new Hono();
@@ -419,86 +481,37 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   app.post("/webhooks/:agent/:plugin", async (c) => {
     const agentId = c.req.param("agent");
     const plugin = c.req.param("plugin");
-    const webhook = store.getWebhook(agentId, plugin);
-
-    if (!webhook) {
-      return c.json({ error: `no webhook registered for ${agentId}/${plugin}` }, 404);
-    }
 
     const rawBody = await c.req.text();
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
 
-    // Run validator if present
-    let validatorResult: unknown;
-    if (webhook.validator) {
-      try {
-        const secretsMap = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
-        const resolvedSecrets: Record<string, string> = {};
-        for (const [key, envVar] of Object.entries(secretsMap)) {
-          resolvedSecrets[key] = process.env[envVar as string] ?? "";
-        }
-
-        // Build directory lookup for validators (IPC needs sender pubkey)
-        const directory: Record<string, { pubkey: string; display_name: string }> = {};
-        for (const a of store.getAllAgents()) {
-          directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
-        }
-
-        validatorResult = await runValidator(webhook.validator, {
-          headers,
-          body: rawBody,
-          secrets: resolvedSecrets,
-          directory,
-        });
-      } catch (e) {
-        return c.json({ error: "webhook validation failed", detail: String(e) }, 401);
-      }
+    // Default JWT validator — verifies sender identity
+    let verified: JwtValidatorResult;
+    try {
+      verified = await verifyJwtSender(headers, rawBody, store);
+    } catch (e) {
+      return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
     }
 
-    // Build routed payload
+    // Parse body
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = rawBody; }
 
-    const vr = validatorResult as Record<string, unknown> | undefined;
-    const source = vr?.source as string
-      ?? (typeof parsedBody === "object" && parsedBody !== null && "source" in parsedBody
-        ? (parsedBody as Record<string, unknown>).source as string
-        : `webhook:${agentId}:${plugin}`);
-    const dest = vr?.dest as string ?? agentId;
-    const topic = vr?.topic as string
-      ?? (typeof parsedBody === "object" && parsedBody !== null && "topic" in parsedBody
-        ? (parsedBody as Record<string, unknown>).topic as string
-        : `webhook.${agentId}.${plugin}`);
-
-    // Envelope: routing metadata at top level, original body on payload
+    // Envelope: routing metadata at top level, original body as payload
     const payload = {
-      from: source,
-      from_name: vr?.sender_display_name as string ?? source,
-      topic,
-      dest,
+      from: verified.source,
+      from_name: verified.sender_display_name,
+      topic: verified.topic,
+      dest: agentId,
       plugin,
       payload: parsedBody,
     };
 
-    // dest_cc_session targets a specific Claude Code session
-    const destCCSession = vr?.dest_cc_session as string | undefined
-      ?? (typeof parsedBody === "object" && parsedBody !== null && "dest_cc_session" in parsedBody
-        ? (parsedBody as Record<string, unknown>).dest_cc_session as string
-        : undefined);
-
-    // Sender's context — from validator result, request body, or look up from active sessions
-    const sourceCCSession = vr?.source_cc_session as string | undefined
-      ?? (typeof parsedBody === "object" && parsedBody !== null && "source_cc_session" in parsedBody
-        ? (parsedBody as Record<string, unknown>).source_cc_session as string
-        : undefined);
-
     const { message, deliveries } = router.route({
-      source,
-      source_cc_session: sourceCCSession,
-      dest,
-      dest_cc_session: destCCSession,
-      topic,
+      source: verified.source,
+      dest: agentId,
+      topic: verified.topic,
       payload: JSON.stringify(payload),
       raw: rawBody,
     });
