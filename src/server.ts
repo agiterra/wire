@@ -174,9 +174,21 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     return verifyEd25519(agent.pubkey, sig, body);
   }
 
-  /** Check for authenticated operator via WebAuthn session cookie. */
+  /** Check for authenticated operator via WebAuthn session cookie or dashboard token. */
+  const DASHBOARD_TOKEN = process.env.WIRE_DASHBOARD_TOKEN;
+
   function isOperator(c: Context): boolean {
-    return !!getOperatorFromSession(c.req.header("cookie"), store);
+    if (getOperatorFromSession(c.req.header("cookie"), store)) return true;
+    if (DASHBOARD_TOKEN) {
+      // Check token cookie
+      const cookies = c.req.header("cookie") ?? "";
+      const tokenCookie = cookies.split(";").map(s => s.trim()).find(s => s.startsWith("wire_token="));
+      if (tokenCookie && tokenCookie.split("=")[1] === DASHBOARD_TOKEN) return true;
+      // Check query param (initial entry point)
+      const tokenParam = new URL(c.req.url).searchParams.get("token");
+      if (tokenParam === DASHBOARD_TOKEN) return true;
+    }
+    return false;
   }
 
   /** Verify a session belongs to the given agent. */
@@ -187,14 +199,31 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
   // --- Auth gates (return error Response or null for authorized) ---
 
-  /** Require Ed25519 signature from a known agent. */
+  /** Require authenticated agent (JWT Bearer or Ed25519 signature). */
   async function requireAgent(c: Context, agentId: string): Promise<Response | null> {
     const agent = store.getAgent(agentId);
     if (!agent) return c.json({ error: `agent '${agentId}' not registered` }, 404);
+
+    // Try JWT Bearer token first
+    const authHeader = c.req.header("authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      try {
+        const result = await verifyJwtSender(
+          { authorization: authHeader },
+          (c as any).get("rawBody") ?? "",
+          store,
+        );
+        if (result.source === agentId) return null;
+        return c.json({ error: "JWT issuer does not match agent" }, 403);
+      } catch (e: any) {
+        return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
+      }
+    }
+
+    // Fall back to Ed25519 raw signature
     if (await verifyAgentSignature(c, agentId)) return null;
-    const sig = c.req.header("x-wire-signature");
-    if (!sig) return c.json({ error: "X-Wire-Signature required" }, 401);
-    return c.json({ error: "invalid signature" }, 403);
+
+    return c.json({ error: "Authorization header (Bearer JWT) or X-Wire-Signature required" }, 401);
   }
 
   /** Require agent owns the session (+ agent signature). */
@@ -525,15 +554,14 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   // --- Dashboard ---
 
   app.get("/", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
-    if (!operatorId) {
+    if (!isOperator(c)) {
       return c.html(renderLogin(store.hasOwner()));
     }
 
-    const operator = store.getOperator(operatorId);
-    if (!operator) {
-      return c.html(renderLogin(store.hasOwner()));
-    }
+    // Resolve operator name — token auth uses a generic name
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    const operator = operatorId ? store.getOperator(operatorId) : null;
+    const displayName = operator?.display_name ?? "Operator";
 
     const agents = store.getAllAgents().map((a) => ({
       ...a,
@@ -541,14 +569,19 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       sessions: store.getActiveSessions(a.id).length,
     }));
 
-    return c.html(_renderDashboard(agents, operator.display_name));
+    // Set token cookie if auth was via query param (so subsequent fetches are auto-authenticated)
+    const tokenParam = new URL(c.req.url).searchParams.get("token");
+    const headers: Record<string, string> = {};
+    if (tokenParam && tokenParam === DASHBOARD_TOKEN) {
+      headers["Set-Cookie"] = `wire_token=${tokenParam}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`;
+    }
+    return c.html(_renderDashboard(agents, displayName), 200, headers);
   });
 
   // --- Recent messages endpoint (for dashboard backfill) ---
 
   app.get("/messages/recent", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
-    if (!operatorId) {
+    if (!isOperator(c)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     const limit = parseInt(c.req.query("limit") ?? "50", 10);
@@ -574,8 +607,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   // --- Tasks endpoint ---
 
   app.get("/tasks", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
-    if (!operatorId) {
+    if (!isOperator(c)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     const tasksPath = join(homedir(), ".wire", "tasks.json");
@@ -594,8 +626,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   });
 
   app.get("/tasks/stream", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
-    if (!operatorId) {
+    if (!isOperator(c)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     const tasksPath = join(homedir(), ".wire", "tasks.json");
@@ -634,8 +665,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   // --- Dashboard SSE (live agent status) ---
 
   app.get("/dashboard/stream", (c) => {
-    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
-    if (!operatorId) {
+    if (!isOperator(c)) {
       return c.json({ error: "unauthorized" }, 401);
     }
 

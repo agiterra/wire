@@ -1,13 +1,14 @@
 {
   "name": "@agiterra/wire",
-  "version": "0.6.0",
-  "description": "The Wire — persistent multi-agent message broker, event log, and registry.",
+  "version": "0.7.0",
+  "description": "The Wire \u2014 persistent multi-agent message broker, event log, and registry.",
   "type": "module",
   "scripts": {
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts"
   },
   "dependencies": {
+    "dotenv": "^17.3.1",
     "hono": "^4.0.0",
     "pino": "^10.3.1"
   },

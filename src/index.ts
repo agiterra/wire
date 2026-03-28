@@ -4,7 +4,13 @@
  * Persistent multi-agent message broker, event log, and registry.
  */
 
+import { join } from "path";
+import { homedir } from "os";
+import { config } from "dotenv";
 import pino from "pino";
+
+// Load all Wire config from ~/.wire/.env
+config({ path: join(homedir(), ".wire", ".env") });
 import { Store } from "./store.js";
 import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
