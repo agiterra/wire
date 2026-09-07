@@ -201,6 +201,28 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   const serverPluginByAgentId = new Map(serverPlugins.map((p) => [p.agentId, p]));
   const app = new Hono();
 
+  // Send-path instrumentation (fondant 2026-09-07, ENG send-timeout probe, Brioche-approved).
+  // Time the synchronous router.route/routeAsync call and log ONLY when it exceeds a threshold, with the
+  // payload size — so a stall on the accept path is MEASURED, not inferred from a client-side timeout
+  // (Brioche 604670: ~4-8KB sends timed out under a host-load spike, no gateway-side record). Wrapping
+  // once here can't miss one of the six route() call sites.
+  const ROUTE_WARN_MS = 250;
+  const _instrumentRoute = <A extends unknown[], R>(name: string, fn: (...a: A) => R) => (...args: A): R => {
+    const input = args[0] as { dest?: string; topic?: string; payload?: unknown } | undefined;
+    const t0 = performance.now();
+    const r = fn(...args);
+    const ms = performance.now() - t0;
+    if (ms >= ROUTE_WARN_MS) {
+      const bytes = typeof input?.payload === "string" ? (input.payload as string).length : 0;
+      log.warn({ event: "route_slow", fn: name, dest: input?.dest, topic: input?.topic, bytes, ms: Math.round(ms) }, "router send-path slow");
+    }
+    return r;
+  };
+  router.route = _instrumentRoute("route", router.route.bind(router)) as typeof router.route;
+  if (typeof (router as { routeAsync?: unknown }).routeAsync === "function") {
+    router.routeAsync = _instrumentRoute("routeAsync", (router.routeAsync as (...a: unknown[]) => unknown).bind(router)) as typeof router.routeAsync;
+  }
+
   app.use("*", cors());
 
   // Global error handler — log and return 500
@@ -1213,6 +1235,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     // measured 504 KB → 172 KB over 20 real events (cartellata, 2026-09-04). Filters keep working
     // on the original; only the delivered copy is slimmed. Every kept key is one lanes read.
     const deliveredPayload = plugin === "github" ? slimGithubPayload(parsedBody) : parsedBody;
+    // Webhook-driven trigger: a github PUSH touches a per-repo-branch marker (mtime = last push) so a
+    // WatchPaths launchd can react immediately (fabrica-root-sync on fabrica-v3 main — lanes read skills
+    // from the shared tree, so a poll-only sync leaves them on stale process; Brioche 2026-09-07). Generic,
+    // best-effort, never blocks delivery: any push to any repo:branch drops /tmp/agiterra-push/<repo>__<branch>.
+    if (plugin === "github") {
+      try {
+        const pb = parsedBody as { ref?: string; repository?: { full_name?: string } } | null;
+        const ref = pb?.ref; const full = pb?.repository?.full_name;
+        if (ref && ref.startsWith("refs/heads/") && full) {
+          const branch = ref.slice("refs/heads/".length);
+          const safe = (x: string) => x.replace(/[^A-Za-z0-9._-]/g, "_");
+          const { mkdirSync, writeFileSync } = await import("fs");
+          const dir = "/tmp/agiterra-push"; mkdirSync(dir, { recursive: true });
+          writeFileSync(`${dir}/${safe(full)}__${safe(branch)}`, new Date().toISOString());
+        }
+      } catch { /* push-trigger is best-effort; must never affect delivery */ }
+    }
     const envelope = {
       ...orgBanner,
       source,
@@ -1880,6 +1919,19 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   });
 
   // --- Start ---
+
+  // Event-loop-lag gauge (fondant 2026-09-07): the gateway is single-threaded, so a stall from big
+  // synchronous work, GC, or host CPU starvation shows here as lag even when no single handler logs
+  // slow. Fires every 5s and warns when it wakes >250ms late. unref so it never keeps the process alive.
+  const ELL_INTERVAL_MS = 5000, ELL_WARN_MS = 250;
+  let _ellExpected = Date.now() + ELL_INTERVAL_MS;
+  const _ellTimer = setInterval(() => {
+    const now = Date.now();
+    const lag = now - _ellExpected;
+    _ellExpected = now + ELL_INTERVAL_MS;
+    if (lag >= ELL_WARN_MS) log.warn({ event: "event_loop_lag", lagMs: Math.round(lag) }, "event loop lag");
+  }, ELL_INTERVAL_MS);
+  (_ellTimer as { unref?: () => void }).unref?.();
 
   const server = Bun.serve({
     port,
