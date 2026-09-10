@@ -1376,7 +1376,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const agentId = c.req.param("id");
     const webhookId = parseInt(c.req.param("webhookId"), 10);
 
-    const err = await requireAgentOrOperator(c);
+    // Bound to the path id (AGI-103 follow-up, found by pain-perdu): with the
+    // any-agent gate, an agent could delete another agent's webhook by naming
+    // the owner in the path — the 409 below compares the row to the PATH, not
+    // to the caller. Same gate as GET/PATCH: self, or the operator.
+    const err = await requireSelfOrOperator(c, agentId);
     if (err) return err;
 
     const webhook = store.getWebhookById(webhookId);

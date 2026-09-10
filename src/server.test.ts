@@ -937,3 +937,28 @@ describe("AGI-103 — PATCH /agents/:id/webhooks/:webhookId rewrites the filter"
     expect(await res.json()).toEqual({ error: "webhook not found" });
   });
 });
+
+describe("AGI-103 follow-up — DELETE /agents/:id/webhooks/:webhookId is bound to the caller's identity", () => {
+  test("an agent may NOT delete another agent's webhook by naming the owner in the path (403, row intact)", async () => {
+    const key = await agentWithKey("papassinos");
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    const id = store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose" });
+    const res = await fetch(`${baseUrl}/agents/cannoli/webhooks/${id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${await agentJwt("papassinos", key, "")}` },
+    });
+    expect(res.status).toBe(403);
+    expect(store.getWebhookById(id)).not.toBeNull();
+  });
+
+  test("the owner's own JWT still deletes its own row", async () => {
+    const key = await agentWithKey("papassinos");
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "slack", name: "mine" });
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${await agentJwt("papassinos", key, "")}` },
+    });
+    expect(res.status).toBe(200);
+    expect(store.getWebhookById(id)).toBeNull();
+  });
+});
