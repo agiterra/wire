@@ -205,3 +205,12 @@ describe("heartbeat restores stale → connected", () => {
     expect(store.getActiveSessions("hb-disc")).toHaveLength(0);
   });
 });
+
+describe("AGI-113 #4 — no cleanup-bypassing bulk webhook delete on the Store", () => {
+  test("deleteWebhooksForAgent is gone (it dropped rows without running their cleanup)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wire-agi113-"));
+    const s = new Store(join(tmp, "wire.db"));
+    expect((s as unknown as Record<string, unknown>).deleteWebhooksForAgent).toBeUndefined();
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  });
+});

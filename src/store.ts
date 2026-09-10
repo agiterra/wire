@@ -43,7 +43,14 @@ CREATE TABLE IF NOT EXISTS agents (
     -- purge — reconcileSessions deletes disconnected sessions after
     -- disconnectMs, which used to strand the cursor and silently skip backlog
     -- on the agent's next reconnect (the SSE-replay-on-connect bug fixed here).
-    last_seen_seq   INTEGER NOT NULL DEFAULT 0
+    last_seen_seq   INTEGER NOT NULL DEFAULT 0,
+    -- When this agent's most recent session ENDED (disconnect, timeout, or
+    -- prune). Survives the deletion of the session rows themselves, which is
+    -- the whole point: agent_sessions rows are deleted 30s after a session
+    -- disconnects, and the webhook janitor's "has anything heartbeated lately"
+    -- test reads as TRUE the instant they go (AGI-113). NULL = this agent has
+    -- never had a session end.
+    last_session_end_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -92,6 +99,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
     meta        TEXT,
     cleanup     TEXT,
     dedup       TEXT,
+    secrets_refresh TEXT,
     created_at  INTEGER NOT NULL,
     UNIQUE(agent_id, plugin, name)
 );
@@ -262,6 +270,13 @@ export type Webhook = {
   cleanup: string | null;
   dedup: string | null;
   emit: string | null;
+  /**
+   * JSON map of secret name → secret-provider id, e.g.
+   * `{"github_token":"gh-app-token"}`. Names WHICH provider re-mints a secret
+   * before the row's cleanup runs; the provider's argv comes from the
+   * gateway's own WIRE_SECRET_PROVIDERS config, never from the row (AGI-113).
+   */
+  secrets_refresh: string | null;
   session_id: string | null;
   responder: string | null;
   ack_early: number;
@@ -520,6 +535,51 @@ export class Store {
     if (!agentCols7.some((c) => c.name === "screen_name")) {
       this.db.exec("ALTER TABLE agents ADD COLUMN screen_name TEXT");
     }
+
+    // last_session_end_at: when this agent's most recent session ended.
+    // AGI-113. The webhook janitor used to ask only "does a surviving
+    // agent_sessions row have last_heartbeat inside the window", and
+    // reconcileSessions DELETES a disconnected session 30s after it ends —
+    // so the 1h WEBHOOK_STALE_MS window silently collapsed to 30s and swept
+    // a just-stopped lane's still-live GitHub hook. Backfill from whatever
+    // session rows are still present so the first tick after deploy doesn't
+    // sweep agents that stopped minutes ago; NULL (no rows to learn from)
+    // keeps the old behavior for that agent, which is the safe direction —
+    // it can only sweep something whose webhook is already past created_at.
+    const agentCols8 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols8.some((c) => c.name === "last_session_end_at")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN last_session_end_at INTEGER");
+      this.db.exec(`
+        UPDATE agents SET last_session_end_at = (
+          SELECT MAX(COALESCE(s.disconnected_at, s.last_heartbeat, s.updated_at))
+          FROM agent_sessions s WHERE s.agent_id = agents.id
+        )
+      `);
+    }
+
+    // secrets_refresh: JSON map of secret name → secret-provider id, e.g.
+    // {"github_token":"gh-app-token"}. AGI-113 #2 — webhook rows carry the
+    // credential captured at REGISTRATION (a ~1h GitHub App installation
+    // token), so every cleanup that runs later 401s and leaves a live hook
+    // behind. The row records only WHICH provider re-mints the secret; the
+    // provider's argv lives in the gateway's own config (WIRE_SECRET_PROVIDERS),
+    // so a webhook registration can never introduce a command to run.
+    const whCols7 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols7.some((c) => c.name === "secrets_refresh")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN secrets_refresh TEXT");
+    }
+  }
+
+  /**
+   * Record that one of `agentId`'s sessions has just ended. Monotonic — a
+   * later end never moves the mark backwards. Read by getStaleWebhooks: an
+   * agent whose last session ended inside the stale window is not stale, even
+   * though its session ROWS are already gone (AGI-113).
+   */
+  private noteSessionEnd(agentId: string, at: number = Date.now()): void {
+    this.db.prepare(
+      "UPDATE agents SET last_session_end_at = MAX(COALESCE(last_session_end_at, 0), ?) WHERE id = ?",
+    ).run(at, agentId);
   }
 
   // --- Messages ---
@@ -806,9 +866,13 @@ export class Store {
   /** Explicit disconnect — intentional close by the agent. */
   disconnectSession(id: string): void {
     const now = Date.now();
+    const row = this.db.prepare("SELECT agent_id FROM agent_sessions WHERE id = ?").get(id) as
+      | { agent_id: string }
+      | undefined;
     this.db.prepare(
       "UPDATE agent_sessions SET disconnected_at = ?, updated_at = ?, status = 'disconnected' WHERE id = ?"
     ).run(now, now, id);
+    if (row) this.noteSessionEnd(row.agent_id, now);
   }
 
   /** Mark session as connected (SSE stream opened/reconnected). */
@@ -884,13 +948,32 @@ export class Store {
       this.db.prepare(
         "UPDATE agent_sessions SET status = 'disconnected', disconnected_at = ?, updated_at = ? WHERE id = ?"
       ).run(now, now, row.id);
+      this.noteSessionEnd(row.agent_id, now);
       transitions.push({ sessionId: row.id, agentId: row.agent_id, newStatus: "disconnected" });
     }
 
-    // Purge old disconnected sessions (no reason to keep them)
+    // Purge old disconnected sessions (no reason to keep them).
+    //
+    // AGI-113: this DELETE is what made the webhook janitor fire 30s after a
+    // clean stop instead of an hour later — with the rows gone, its
+    // `NOT EXISTS (… last_heartbeat > cutoff)` test is trivially true. The end
+    // time is stamped onto the agent FIRST, so the janitor can still tell a
+    // lane that stopped 30s ago from one that stopped last week. (Belt and
+    // braces: the two paths above already stamp it when the session ends.)
+    const pruneCutoff = now - disconnectMs;
+    this.db.prepare(`
+      UPDATE agents SET last_session_end_at = MAX(COALESCE(last_session_end_at, 0), COALESCE((
+        SELECT MAX(s.disconnected_at) FROM agent_sessions s
+        WHERE s.agent_id = agents.id AND s.status = 'disconnected' AND s.disconnected_at < ?
+      ), 0))
+      WHERE EXISTS (
+        SELECT 1 FROM agent_sessions s
+        WHERE s.agent_id = agents.id AND s.status = 'disconnected' AND s.disconnected_at < ?
+      )
+    `).run(pruneCutoff, pruneCutoff);
     this.db.prepare(
       "DELETE FROM agent_sessions WHERE status = 'disconnected' AND disconnected_at < ?"
-    ).run(now - disconnectMs);
+    ).run(pruneCutoff);
 
     return transitions;
   }
@@ -941,18 +1024,20 @@ export class Store {
     cleanup?: string;
     dedup?: string;
     emit?: string;
+    secretsRefresh?: string;
     sessionId?: string;
     responder?: string;
     ackEarly?: boolean;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, responder, ack_early, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, secrets_refresh, session_id, responder, ack_early, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
       opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null,
+      opts.secretsRefresh ?? null,
       opts.sessionId ?? null, opts.responder ?? null, opts.ackEarly ? 1 : 0, now,
     );
     return Number(result.lastInsertRowid);
@@ -975,7 +1060,9 @@ export class Store {
    * advertised to external services (Slack, GitHub, etc.) and must survive
    * offline periods so the agent can resume on reconnect with the same URL.
    * Operators manage permanent-agent webhook lifecycle explicitly via
-   * `deleteWebhooksForAgent`.
+   * DELETE /agents/:id/webhooks/:webhookId, which runs the row's cleanup
+   * before dropping it. (There is deliberately no bulk Store-level delete —
+   * see AGI-113 #4.)
    *
    * Why this matters: the prior policy ("sweep both kinds; permanents re-
    * register on reconnect") assumed plugins idempotently re-registered on
@@ -991,6 +1078,18 @@ export class Store {
    * for Madeleine and Tiramisu in mid-2026-05 came from exactly that gate —
    * once an ephemeral was purged once and later re-registered webhooks, the
    * old reaper never revisited it.
+   *
+   * AGI-113: staleness is judged on the agent's LIVENESS, not on which
+   * session rows happen to still exist. Surviving heartbeats are one half;
+   * `agents.last_session_end_at` is the other. reconcileSessions DELETES a
+   * disconnected session 30s after it ends, and with the row gone the
+   * NOT EXISTS test flips to true — which is how a lane that stopped 30s ago
+   * got its live GitHub hook swept under a one-HOUR policy. An agent whose
+   * last session ended less than `staleMs` ago is not stale.
+   * `last_session_end_at IS NULL` means "no session has ever ended here"
+   * (never connected, or a pre-migration row with nothing to backfill from),
+   * which stays sweepable — otherwise webhooks from agents that never opened
+   * a session would leak forever.
    */
   getStaleWebhooks(staleMs: number): Webhook[] {
     const cutoff = Date.now() - staleMs;
@@ -999,20 +1098,21 @@ export class Store {
       JOIN agents a ON a.id = w.agent_id
       WHERE a.permanent = 0
         AND w.created_at < ?
+        AND (a.last_session_end_at IS NULL OR a.last_session_end_at < ?)
         AND NOT EXISTS (
           SELECT 1 FROM agent_sessions s
           WHERE s.agent_id = w.agent_id AND s.last_heartbeat > ?
         )
-    `).all(cutoff, cutoff) as Webhook[];
+    `).all(cutoff, cutoff, cutoff) as Webhook[];
   }
 
-  deleteWebhooksForAgent(agentId: string, plugin?: string): void {
-    if (plugin) {
-      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ? AND plugin = ?").run(agentId, plugin);
-    } else {
-      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(agentId);
-    }
-  }
+  // AGI-113 #4: deleteWebhooksForAgent() was removed here. It had no caller
+  // and dropped rows WITHOUT running their cleanup — i.e. it was a
+  // ready-made source of exactly the orphaned-external-hook bug this ticket
+  // is about. Every path that removes a webhook (session end, reaper purge,
+  // janitor, DELETE route) runs the cleanup first; anything that needs bulk
+  // teardown should loop over getWebhooksForAgent() and go through
+  // runWebhookCleanup() + deleteWebhook() like they do.
 
   /** @deprecated Use createWebhook instead */
   upsertWebhook(agentId: string, plugin: string, validator?: string, secretsMap?: string): void {
@@ -1130,6 +1230,19 @@ export class Store {
    * on subsequent ticks.
    */
   purgeAgentDependents(id: string): void {
+    // Stamp the last session end before the rows go — same reason as the
+    // prune in reconcileSessions (AGI-113). This one is not on the hot path
+    // for the observed bug (it only runs an hour after grey-out, and it
+    // deletes the webhooks too), but it is the other place that empties
+    // agent_sessions and would otherwise make a LATER-registered webhook
+    // instantly sweepable.
+    this.db.prepare(`
+      UPDATE agents SET last_session_end_at = MAX(COALESCE(last_session_end_at, 0), COALESCE((
+        SELECT MAX(COALESCE(s.disconnected_at, s.last_heartbeat, s.updated_at))
+        FROM agent_sessions s WHERE s.agent_id = agents.id
+      ), 0))
+      WHERE id = ?
+    `).run(id);
     this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
     this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
     this.db.prepare("UPDATE agents SET dependents_purged_at = ? WHERE id = ?").run(Date.now(), id);

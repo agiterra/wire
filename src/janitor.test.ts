@@ -172,3 +172,107 @@ describe("getStaleWebhooks — janitor query", () => {
     expect(stale.map((w) => w.id)).toContain(wid);
   });
 });
+
+// --- AGI-113 ---------------------------------------------------------------
+//
+// Measured by torta-caprese (AGI-108) in the live gateway log:
+//   13:23:54Z agent_soft_reap papassinos (a crew agent_stop)
+//   13:24:24Z webhook_janitor_swept + webhook_janitor_cleanup_ok, webhook 119
+// — 30 s apart, though WEBHOOK_STALE_MS defaults to 1 h.
+//
+// The tests below reproduce that against the real Store. 30 s is not a
+// coincidence: it is DISCONNECT_MS, the age at which reconcileSessions'
+// disconnected-session prune DELETES the session row.
+
+/** Backdate a session's disconnected_at so the prune step sees it as old. */
+function ageDisconnect(sessionId: string, ageMs: number): void {
+  // @ts-expect-error — test reaches into the Store's db handle to fake age
+  store.db.prepare("UPDATE agent_sessions SET disconnected_at = ? WHERE id = ?")
+    .run(Date.now() - ageMs, sessionId);
+}
+
+/** Backdate the agent's recorded last-session-end so the cutoff is crossed. */
+function ageSessionEnd(agentId: string, ageMs: number): void {
+  // @ts-expect-error — test reaches into the Store's db handle to fake age
+  store.db.prepare("UPDATE agents SET last_session_end_at = ? WHERE id = ?")
+    .run(Date.now() - ageMs, agentId);
+}
+
+describe("AGI-113 #1 — janitor must consider session END, not only surviving heartbeats", () => {
+  const STALE_MS = 3_600_000;   // WEBHOOK_STALE_MS default (1 h)
+  const DISCONNECT_MS = 30_000; // DISCONNECT_MS default
+
+  test("TRACE: the prune in reconcileSessions deletes the session row 30 s after a clean stop, and the janitor then sweeps a webhook that is 30 s — not 1 h — old in liveness terms", () => {
+    makeAgent("papassinos");
+    const wid = makeWebhook("papassinos", "wire-pr-1", "/* delete the github hook */");
+    ageWebhook(wid, 2 * 3_600_000); // registered 2 h ago — past the created_at cutoff
+    const sid = freshSession("papassinos");
+
+    // t=0: agent alive and heartbeating. Nothing stale.
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).not.toContain(wid);
+
+    // t=0: agent_stop → POST /agents/disconnect (server.ts:718 → store.ts:807).
+    // The row is marked disconnected but SURVIVES with a fresh last_heartbeat,
+    // so the janitor's NOT EXISTS test is still false. Still not swept.
+    store.disconnectSession(sid);
+    expect(store.getSession(sid)).not.toBeNull();
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).not.toContain(wid);
+
+    // t=+30 s: the next reconciler tick runs the disconnected-session prune.
+    ageDisconnect(sid, DISCONNECT_MS + 1_000);
+    store.reconcileSessions(20_000, DISCONNECT_MS);
+
+    // ↓ THE DELETION MECHANISM — store.ts:892, inside reconcileSessions:
+    //     DELETE FROM agent_sessions
+    //      WHERE status = 'disconnected' AND disconnected_at < ?
+    expect(store.getSession(sid)).toBeNull();
+
+    // With no session row left, `NOT EXISTS (… last_heartbeat > cutoff)` is
+    // trivially TRUE, so the 1 h window collapses to 30 s. That is the defect.
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).not.toContain(wid);
+  });
+
+  test("timeout path too: a session pruned after stale→disconnected does not make the webhook instantly stale", () => {
+    makeAgent("timed-out");
+    const wid = makeWebhook("timed-out", "wire-pr-2");
+    ageWebhook(wid, 2 * 3_600_000);
+    // Heartbeat lapsed 40 s ago: the reconciler flips connected→stale→
+    // disconnected and prunes it, all well inside the 1 h webhook window.
+    const sid = staleSession("timed-out", 40_000);
+    store.reconcileSessions(20_000, DISCONNECT_MS);
+    ageDisconnect(sid, DISCONNECT_MS + 1_000);
+    store.reconcileSessions(20_000, DISCONNECT_MS);
+    expect(store.getSession(sid)).toBeNull();
+
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).not.toContain(wid);
+  });
+
+  test("purgeAgentDependents does not leave a later-registered webhook instantly sweepable", () => {
+    // purgeAgentDependents deletes ALL of an agent's agent_sessions rows
+    // (store.ts:1134), which is the other way the NOT EXISTS test goes
+    // trivially true. A webhook registered after the purge must still get
+    // the full stale window.
+    makeAgent("purged");
+    const sid = freshSession("purged");
+    store.disconnectSession(sid);
+    store.purgeAgentDependents("purged");
+    const wid = makeWebhook("purged", "wire-pr-3");
+    ageWebhook(wid, 2 * 3_600_000);
+
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).not.toContain(wid);
+  });
+
+  test("the window still closes: once the last session ended longer ago than the cutoff, the webhook IS swept", () => {
+    makeAgent("long-gone");
+    const wid = makeWebhook("long-gone", "wire-pr-4");
+    ageWebhook(wid, 4 * 3_600_000);
+    const sid = freshSession("long-gone");
+    store.disconnectSession(sid);
+    ageDisconnect(sid, DISCONNECT_MS + 1_000);
+    store.reconcileSessions(20_000, DISCONNECT_MS);
+    // …and now two hours pass with the agent still gone.
+    ageSessionEnd("long-gone", 2 * 3_600_000);
+
+    expect(store.getStaleWebhooks(STALE_MS).map((w) => w.id)).toContain(wid);
+  });
+});

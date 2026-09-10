@@ -657,3 +657,51 @@ describe("Change A — allowedPeers opt-in: a listed peer's forwards DO reach th
     expect(json.error).toBe("cross-broker-server-plugin-not-enabled");
   });
 });
+
+describe("AGI-113 #3 — DELETE /agents/:id/webhooks/:webhookId distinguishes missing from mis-owned", () => {
+  test("a webhook id that does not exist is 404 'webhook not found'", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/webhooks/999999?token=${TOKEN}`, { method: "DELETE" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "webhook not found" });
+  });
+
+  test("a webhook that exists but belongs to another agent is 409, naming the owner", async () => {
+    store.upsertAgent({ id: "papassinos", display_name: "papassinos", pubkey: "pk-p", permanent: false });
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-1" });
+
+    // Same authenticated operator, wrong agent in the path.
+    const res = await fetch(`${baseUrl}/agents/fondant/webhooks/${id}?token=${TOKEN}`, { method: "DELETE" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "webhook owned by papassinos" });
+
+    // And the mis-addressed DELETE must not have removed anything.
+    expect(store.getWebhookById(id)).not.toBeNull();
+  });
+
+  test("the owning path still deletes", async () => {
+    store.upsertAgent({ id: "papassinos", display_name: "papassinos", pubkey: "pk-p", permanent: false });
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-2" });
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}?token=${TOKEN}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: id });
+    expect(store.getWebhookById(id)).toBeNull();
+  });
+});
+
+describe("AGI-113 #2 — POST /agents/:id/webhooks records how to refresh a secret", () => {
+  test("a secrets_refresh object is stored on the row", async () => {
+    const res = await register({
+      plugin: "github", name: "pr-refresh",
+      secrets: { github_token: "ghs-at-registration" },
+      secrets_refresh: { github_token: "gh-app-token" },
+    });
+    const { webhook_id } = await res.json() as { webhook_id: number };
+    expect(store.getWebhookById(webhook_id)!.secrets_refresh).toBe(JSON.stringify({ github_token: "gh-app-token" }));
+  });
+
+  test("a non-object secrets_refresh is ignored, not stored", async () => {
+    const res = await register({ plugin: "github", name: "pr-bad-refresh", secrets_refresh: "gh-app-token" });
+    const { webhook_id } = await res.json() as { webhook_id: number };
+    expect(store.getWebhookById(webhook_id)!.secrets_refresh).toBeNull();
+  });
+});

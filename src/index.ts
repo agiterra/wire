@@ -35,7 +35,7 @@ import { Store } from "./store.js";
 import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
 import { ServerPluginBus, loadServerPlugins } from "./server-plugins.js";
-import { createServer, runCleanup } from "./server.js";
+import { createServer, runWebhookCleanup } from "./server.js";
 import { HeartbeatScheduler } from "./heartbeat.js";
 import { runCli } from "./cli.js";
 import { loadOrCreateServerIdentity } from "./identity.js";
@@ -134,15 +134,7 @@ function purgeSessionScopedWebhooks(sessionId: string): void {
   const hooks = store.getWebhooksBySession(sessionId);
   if (hooks.length === 0) return;
   for (const wh of hooks) {
-    if (wh.cleanup) {
-      const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
-      const meta = wh.meta ? JSON.parse(wh.meta) : {};
-      runCleanup(wh.cleanup, { meta, secrets }).then(() => {
-        log.info({ event: "session_scoped_cleanup_ok", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, "session-scoped webhook cleanup ok");
-      }).catch((e) => {
-        log.error({ event: "session_scoped_cleanup_error", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name, err: e }, "session-scoped webhook cleanup error");
-      });
-    }
+    void runWebhookCleanup(wh, log, "session_scoped_cleanup", { session: sessionId });
     store.deleteWebhook(wh.id);
     log.info({ event: "session_scoped_webhook_swept", agent: wh.agent_id, webhook_id: wh.id, session: sessionId, plugin: wh.plugin, name: wh.name }, `session-end: swept webhook ${wh.id}`);
   }
@@ -244,15 +236,7 @@ setInterval(() => {
   for (const agentId of purgeIds) {
     const webhooks = store.getWebhooksForAgent(agentId);
     for (const wh of webhooks) {
-      if (wh.cleanup) {
-        const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
-        const meta = wh.meta ? JSON.parse(wh.meta) : {};
-        runCleanup(wh.cleanup, { meta, secrets }).then(() => {
-          log.info({ event: "webhook_cleanup_ok", agent: agentId }, "webhook cleanup ok");
-        }).catch((e) => {
-          log.error({ event: "webhook_cleanup_error", agent: agentId, err: e }, "webhook cleanup error");
-        });
-      }
+      void runWebhookCleanup(wh, log, "webhook_cleanup", { via: "dependent_purge" });
     }
     store.purgeAgentDependents(agentId);
     log.info({ event: "agent_dependents_purged", agent: agentId }, `agent ${agentId} dependents purged (identity preserved)`);
@@ -266,15 +250,11 @@ setInterval(() => {
   // agents that have gone offline (they can re-register on reconnect).
   const staleWebhooks = store.getStaleWebhooks(webhookStaleMs);
   for (const wh of staleWebhooks) {
-    if (wh.cleanup) {
-      const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
-      const meta = wh.meta ? JSON.parse(wh.meta) : {};
-      runCleanup(wh.cleanup, { meta, secrets }).then(() => {
-        log.info({ event: "webhook_janitor_cleanup_ok", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, "janitor: webhook cleanup ok");
-      }).catch((e) => {
-        log.error({ event: "webhook_janitor_cleanup_error", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name, err: e }, "janitor: webhook cleanup error");
-      });
-    }
+    // Cleanup outcome is reported truthfully and, when it fails, raises a
+    // `webhook_cleanup_orphan` alarm naming the repo + external hook id —
+    // the row is deleted either way, so that line is the only trace left of
+    // a hook this gateway could not delete (AGI-113 #2).
+    void runWebhookCleanup(wh, log, "webhook_janitor_cleanup");
     store.deleteWebhook(wh.id);
     log.info({ event: "webhook_janitor_swept", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, `janitor: swept stale webhook ${wh.id} (${wh.agent_id}/${wh.plugin}/${wh.name})`);
   }

@@ -26,7 +26,7 @@ import { join } from "path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Context } from "hono";
-import type { Store } from "./store.js";
+import type { Store, Webhook } from "./store.js";
 import type { Router } from "./router.js";
 import type { MessageEmitter, SSEWriter } from "./emitter.js";
 import {
@@ -42,6 +42,7 @@ import type { Logger } from "pino";
 import { evaluateFilter, evaluateExpression, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { peekAgentScreen, type PeekAgent, type PeekResult } from "./peek-screen.js";
+import { loadSecretProviders, refreshSecrets } from "./secret-providers.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -152,13 +153,143 @@ async function verifyJwt(
  */
 // --- Webhook Cleanup (VM-lite) ---
 
+/**
+ * A response status the cleanup received that means it did NOT clean up.
+ * 404 is excluded on purpose: for a DELETE — which is what every cleanup in
+ * the fleet does — "already gone" is the outcome we wanted.
+ */
+function isCleanupFailureStatus(status: number): boolean {
+  return status >= 400 && status !== 404;
+}
+
+/**
+ * Run a webhook's cleanup JS.
+ *
+ * Rejects when the cleanup throws (unchanged, and relied on by every caller),
+ * and ALSO when the cleanup quietly accepted a failed HTTP response.
+ *
+ * Why the second half (AGI-113 #2): the cleanup body is client-supplied and
+ * stored on the row at REGISTRATION time. github-tools only started throwing
+ * on a bad status under AGI-108, so every row registered before that carries a
+ * body that ignores `res.ok` — which is how the live gateway logged
+ * `webhook_janitor_cleanup_ok` for webhook 119 while GitHub hook 676795468
+ * stayed live and stayed delivering. The gateway cannot rewrite stored bodies,
+ * so it watches the fetches instead. This only ever changes which log line is
+ * emitted (and whether the orphan alarm fires) — the row is deleted either way.
+ */
 export async function runCleanup(
   code: string,
   ctx: { meta: Record<string, unknown>; secrets: Record<string, string> },
 ): Promise<void> {
+  const failures: { url: string; status: number }[] = [];
+  const watchedFetch: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    if (isCleanupFailureStatus(res.status)) {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+      failures.push({ url, status: res.status });
+    }
+    return res;
+  };
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const fn = new AsyncFunction("meta", "secrets", "fetch", code);
-  await fn(ctx.meta, ctx.secrets, fetch);
+  await fn(ctx.meta, ctx.secrets, watchedFetch);
+  if (failures.length > 0) {
+    const worst = failures[failures.length - 1];
+    throw new Error(
+      `cleanup completed but ${failures.length} request(s) failed; last: ${worst.status} ${worst.url}`,
+    );
+  }
+}
+
+/**
+ * Run one webhook row's cleanup and say, truthfully, whether the external
+ * state it owns is gone. The single entry point for all four teardown paths
+ * (session end, reaper dependent-purge, janitor sweep, DELETE route) so they
+ * cannot drift apart on credential handling or on reporting.
+ *
+ * `event` is the log-event prefix the caller already used, e.g.
+ * "webhook_janitor_cleanup" → `<event>_ok` / `<event>_error`. On failure it
+ * also emits ONE alarm-shaped `webhook_cleanup_orphan` line carrying the repo
+ * and external hook id, so a sweep can act on hooks this gateway could not
+ * delete. Returns true on success. Never throws.
+ */
+export async function runWebhookCleanup(
+  wh: Webhook,
+  log: Logger,
+  event: string,
+  extra: Record<string, unknown> = {},
+): Promise<boolean> {
+  if (!wh.cleanup) return true;
+  const base = { agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name, ...extra };
+
+  let meta: Record<string, unknown> = {};
+  let secrets: Record<string, string> = {};
+  try {
+    meta = wh.meta ? JSON.parse(wh.meta) : {};
+    secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
+  } catch (e) {
+    log.error({ event: `${event}_error`, ...base, err: String(e) }, "cleanup: unparseable meta/secrets");
+    logCleanupOrphan(log, wh, meta, "unparseable meta/secrets", extra);
+    return false;
+  }
+
+  // Re-mint any secret the row declared refreshable. A stored GitHub App
+  // installation token is ~1h old by the time most cleanups run.
+  const refresh = await refreshSecrets(secrets, wh.secrets_refresh, loadSecretProviders());
+  if (refresh.refreshed.length > 0) {
+    log.info({ event: "webhook_secret_refreshed", ...base, secrets: refresh.refreshed }, "cleanup: minted fresh credential");
+  }
+  for (const f of refresh.failed) {
+    // Names only — never the value, and never the provider's stdout.
+    log.warn(
+      { event: "webhook_secret_refresh_failed", ...base, secret: f.name, provider: f.provider, reason: f.reason },
+      "cleanup: could not refresh credential — falling back to the stored one",
+    );
+  }
+
+  try {
+    await runCleanup(wh.cleanup, { meta, secrets: refresh.secrets });
+    log.info({ event: `${event}_ok`, ...base }, "webhook cleanup ok");
+    return true;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    log.error({ event: `${event}_error`, ...base, err: reason }, "webhook cleanup error");
+    logCleanupOrphan(log, wh, meta, reason, extra);
+    return false;
+  }
+}
+
+/**
+ * One alarm-shaped line per external resource this gateway failed to tear
+ * down. Deliberately at error level with a stable event name and the repo +
+ * hook id in fields, so a sweep (or a log alert) can act on it without
+ * parsing prose. `repo`/`hook_id` are the github-tools meta shape; anything
+ * else falls back to the raw meta so the line is still actionable.
+ */
+function logCleanupOrphan(
+  log: Logger,
+  wh: Webhook,
+  meta: Record<string, unknown>,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): void {
+  const repo = typeof meta.repo === "string" ? meta.repo : undefined;
+  const hookId = meta.github_hook_id ?? undefined;
+  log.error(
+    {
+      event: "webhook_cleanup_orphan",
+      agent: wh.agent_id,
+      webhook_id: wh.id,
+      plugin: wh.plugin,
+      name: wh.name,
+      ...(repo !== undefined ? { repo } : {}),
+      ...(hookId !== undefined ? { hook_id: hookId } : {}),
+      ...(repo === undefined && hookId === undefined ? { meta } : {}),
+      reason,
+      ...extra,
+    },
+    `ORPHANED external hook: ${wh.plugin}/${wh.name}${repo ? ` on ${repo}` : ""}${hookId !== undefined ? ` (hook ${hookId})` : ""} — cleanup failed, wire row is gone`,
+  );
 }
 
 
@@ -1029,7 +1160,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id, responder, ack_early } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, secrets_refresh, session_id, responder, ack_early } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
@@ -1073,6 +1204,13 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       meta: meta ? JSON.stringify(meta) : undefined,
       cleanup: cleanup ?? undefined,
       dedup: dedup ?? undefined,
+      // Which gateway-configured provider re-mints which secret before this
+      // row's cleanup runs (AGI-113 #2). Names only — the provider's argv
+      // comes from WIRE_SECRET_PROVIDERS, never from a registration.
+      secretsRefresh:
+        secrets_refresh && typeof secrets_refresh === "object" && !Array.isArray(secrets_refresh)
+          ? JSON.stringify(secrets_refresh)
+          : undefined,
       sessionId: typeof session_id === "string" && session_id.length > 0 ? session_id : undefined,
       responder: typeof responder === "string" && responder.length > 0 ? responder : undefined,
       ackEarly: ack_early === true || ack_early === 1,
@@ -1093,16 +1231,24 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (err) return err;
 
     const webhook = store.getWebhookById(webhookId);
-    if (!webhook || webhook.agent_id !== agentId) {
+    if (!webhook) {
       return c.json({ error: "webhook not found" }, 404);
     }
-
-    // Run client-provided cleanup code if registered
-    if (webhook.cleanup) {
-      const secrets = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
-      const meta = webhook.meta ? JSON.parse(webhook.meta) : {};
-      runCleanup(webhook.cleanup, { meta, secrets }).catch(() => {});
+    // AGI-113 #3: an existing row under the wrong agent is NOT "not found".
+    // Collapsing the two sent callers hunting for a row that was right there,
+    // and hid mis-addressed deletes from the very ticket about orphaned hooks.
+    // 409 (the row exists, this path is wrong) rather than 403 (this caller may
+    // not) — authorization already happened above, and an operator with full
+    // rights still gets this when the path disagrees with the row. Naming the
+    // owner is the whole point of the distinction; nothing else is disclosed.
+    if (webhook.agent_id !== agentId) {
+      return c.json({ error: `webhook owned by ${webhook.agent_id}` }, 409);
     }
+
+    // Run client-provided cleanup code if registered. Fire-and-forget as
+    // before — the caller does not wait on GitHub — but the outcome is now
+    // logged and an unclean teardown raises the orphan alarm.
+    void runWebhookCleanup(webhook, log, "webhook_cleanup", { via: "delete_route" });
 
     store.deleteWebhook(webhookId);
     return c.json({ deleted: webhookId });
