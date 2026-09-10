@@ -541,10 +541,17 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const mx = Math.max.apply(null, known);
       return mx >= 95 ? 'red' : (mx >= 80 ? 'amber' : 'ok');
     }
-    function usageCell(label, state, vals, note) {
+    // noteIsHtml: the caller built the note from esc()'d pieces itself (e.g. a copyable span) — pass it through unescaped.
+    function usageCell(label, state, vals, note, noteIsHtml) {
       return '<div class="usage-cell ' + state + '"><div class="usage-label">' + esc(label) + '</div>' +
         '<div class="usage-vals">' + vals.map(v => '<span title="' + esc(v[2] || '') + '">' + esc(v[0]) + ' ' + esc(v[1]) + '</span>').join('') + '</div>' +
-        (note ? '<div class="usage-note">' + esc(note) + '</div>' : '') + '</div>';
+        (note ? '<div class="usage-note">' + (noteIsHtml ? note : esc(note)) + '</div>' : '') + '</div>';
+    }
+    // Pool box: short address on screen, full address on the clipboard (Tim 2026-09-10). Empty/absent address → plain '—'.
+    function devWalletSpan(addr) {
+      const a = String(addr || '');
+      if (!a) return '—';
+      return '<span class="copyable" data-copy="' + esc(a) + '" title="Click to copy full address ' + esc(a) + '">' + esc(a.slice(0, 10)) + '…</span>';
     }
     async function loadUsage() {
       const el = document.getElementById('usage-strip');
@@ -604,11 +611,13 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           poolCell = usageCell('Pool', low ? 'red' : 'ok',
             [['USDC', (pl.usdc === null ? '—' : Number(pl.usdc).toFixed(2)), 'min ' + pl.min_usdc], ['ETH', (pl.eth === null ? '—' : Number(pl.eth).toFixed(4)), 'min ' + pl.min_eth],
              ['props', ((pl.properties || {}).status === 'live' ? String((pl.properties || {}).count) : '?'), 'properties banked in the pool (' + ((pl.properties || {}).status || 'no ledger') + ')']],
-            (pl.flags && pl.flags.length) ? pl.flags[0] : 'dev-wallet ' + String((pl.pool || {}).address || '').slice(0, 10) + '… as of ' + String(pl.as_of || '').slice(11, 16) + 'Z');
+            ((pl.flags && pl.flags.length) ? esc(pl.flags[0]) + ' · ' : '') + 'dev-wallet ' + devWalletSpan((pl.pool || {}).address) +
+              ((pl.flags && pl.flags.length) ? '' : ' as of ' + esc(String(pl.as_of || '').slice(11, 16)) + 'Z'), true);
         } else if (pl) {
           poolCell = usageCell('Pool', 'red', [['pool', 'unreadable', '']], pl.error || pl.status);
         }
         el.innerHTML = claude + grok + codex + hostCell + poolCell + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
+        el.querySelectorAll('[data-copy]').forEach(c => { c.onclick = (e) => { e.stopPropagation(); copy(c.dataset.copy, c); }; });
       } catch (e) {
         el.innerHTML = usageCell('tokens', 'red', [['/usage', 'failed', '']], String(e));
       }
