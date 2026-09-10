@@ -45,6 +45,12 @@ import { evaluateFilter, evaluateExpression, validateFilter, checkFilter } from 
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { peekAgentScreen, type PeekAgent, type PeekResult } from "./peek-screen.js";
 import { loadSecretProviders, refreshSecrets } from "./secret-providers.js";
+import {
+  jwtMode,
+  checkFreshness,
+  checkAndRecordReplay,
+  redactCredentialHeaders,
+} from "./jwt-guard.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -105,9 +111,15 @@ function b64urlDecode(s: string): Uint8Array {
 
 
 /**
- * Verify JWT Bearer token — Ed25519 signature + body hash integrity.
- * Returns verified claims and sender info. Does not require any specific claims
- * beyond iss and body_hash.
+ * Verify JWT Bearer token — Ed25519 signature + body hash integrity, plus
+ * freshness (iat max-age / exp) and single-use (jti replay cache).
+ *
+ * AGI-30: signature + body_hash alone bound forgery to an IDENTICAL replay —
+ * and an identical replay was free forever, because nothing here looked at the
+ * clock or remembered a token it had already accepted. Freshness and replay are
+ * checked under WIRE_JWT_MODE (default `grace`: log the would-reject, accept
+ * anyway) so the fleet's minters can be moved before anything starts failing.
+ * See jwt-guard.ts for the knobs and the rollout shape.
  */
 async function verifyJwt(
   headers: Record<string, string>,
@@ -144,6 +156,32 @@ async function verifyJwt(
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
   const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (bodyHash !== claims.body_hash) throw new Error("body hash mismatch");
+
+  // --- AGI-30: freshness + single-use ---
+  // Runs LAST, and only on a token whose signature and body_hash already
+  // passed: an unsigned or tampered token must never get an entry in the replay
+  // cache (that would be a free eviction lever for an unauthenticated caller).
+  const mode = jwtMode();
+  if (mode !== "off") {
+    const reason =
+      checkFreshness(claims) ?? checkAndRecordReplay(sender, claims, sigB64!);
+    if (reason) {
+      if (mode === "enforce") throw new Error(reason);
+      // GRACE: one structured line per would-reject. `grep -c jwt_would_reject`
+      // over the gateway log is the number the rollout gates on.
+      _serverLog?.warn(
+        {
+          event: "jwt_would_reject",
+          iss: sender,
+          reason,
+          has_iat: claims.iat !== undefined,
+          has_exp: claims.exp !== undefined,
+          has_jti: claims.jti !== undefined,
+        },
+        `JWT would be rejected under WIRE_JWT_MODE=enforce: ${reason}`,
+      );
+    }
+  }
 
   // pubkey is the key the signature was VERIFIED against (Change A §3.2) —
   // callers may thread it into RouteInput.source_pubkey for plugin recipients.
@@ -1558,7 +1596,13 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       dest: agentId,
       plugin,
       ...(webhook ? { webhook_id: webhook.id, webhook_name: webhook.name } : {}),
-      headers,
+      // AGI-30: the sender's own credentials stop here. Up to this point the
+      // FULL headers were needed and used — the validator verifies the GitHub
+      // HMAC, the filter and the dedup expression read them, verifyJwt read the
+      // Bearer. From here the object is fanned out to recipients, handed to
+      // federated peers and written to messages.payload, so the credential
+      // headers come off first. Non-credential headers are untouched.
+      headers: redactCredentialHeaders(headers),
       payload: deliveredPayload,
     };
 
@@ -1653,7 +1697,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       source,
       topic: `webhook.${topic}`,
       plugin: topic,
-      headers,
+      // AGI-30, and worst here: a broadcast fans this envelope out to EVERY
+      // subscriber on the topic. A signed token in it is a credential handed to
+      // the whole fleet at once. It never leaves the gateway.
+      headers: redactCredentialHeaders(headers),
       payload: parsedBody,
     };
 
