@@ -547,6 +547,18 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         '<div class="usage-vals">' + vals.map(v => '<span title="' + esc(v[2] || '') + '">' + esc(v[0]) + ' ' + esc(v[1]) + '</span>').join('') + '</div>' +
         (note ? '<div class="usage-note">' + (noteIsHtml ? note : esc(note)) + '</div>' : '') + '</div>';
     }
+    // Host box note: the flag if any, then the top memory CONSUMERS by footprint (resident + compressed), highest
+    // first, from host-usage.sh's grouped consumers list (Tim 2026-09-10: "what is consuming memory ... highest to lowest").
+    // Hover the cell for the full list. Older meter files without a consumers list fall back to the as-of stamp.
+    function hostNote(h) {
+      const gb = (mb) => (mb / 1024).toFixed(1) + 'G';
+      const cons = Array.isArray(h.consumers) ? h.consumers : [];
+      const flag = (h.flags && h.flags.length) ? esc(h.flags[0]) : '';
+      if (!cons.length) return flag || ('as of ' + esc(String(h.as_of || '').slice(11, 16)) + 'Z');
+      const full = cons.map(c => gb(c.footprint_mb) + '  ' + c.name + ' x' + c.procs + ' (rss ' + gb(c.rss_mb) + ' + compressed ' + gb(c.cmprs_mb) + ')').join('\\n');
+      const top = cons.slice(0, 3).map(c => esc(String(c.name).replace(/ \\(.*\\)$/, '')) + ' ' + gb(c.footprint_mb)).join(' · ');
+      return (flag ? flag + ' · ' : '') + '<span title="footprint = resident + compressed, highest first\\n' + esc(full) + '">' + top + (cons.length > 3 ? ' · …' : '') + '</span>';
+    }
     // Pool box: short address on screen, full address on the clipboard (Tim 2026-09-10). Empty/absent address → plain '—'.
     function devWalletSpan(addr) {
       const a = String(addr || '');
@@ -602,7 +614,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           const hstate = (swp !== null && swp >= 50) || (mf !== null && mf < 15) || (dfree !== undefined && dfree < 20) ? 'red' : ((swp !== null && swp >= 25) || (mf !== null && mf < 30) || (dfree !== undefined && dfree < 40) ? 'amber' : 'ok');
           hostCell = usageCell('Host', hstate,
             [['mem used', fmt(pctNum((h.mem || {}).used_pct)), (h.mem || {}).total_gb + ' GB'], ['swap', fmt(swp), ((h.swap || {}).used_mb || 0) + ' / ' + ((h.swap || {}).total_mb || 0) + ' MB'], ['disk free', (dfree === undefined ? '—' : dfree + ' GB'), ((h.disk || {}).used_pct || '') + '% used']],
-            (h.flags && h.flags.length) ? h.flags[0] : 'as of ' + String(h.as_of || '').slice(11, 16) + 'Z');
+            hostNote(h), true);
         }
         const pl = j.pool || null;
         let poolCell = usageCell('Pool', 'unknown', [['USDC', '—', ''], ['ETH', '—', '']], 'no pool meter');
