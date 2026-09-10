@@ -705,3 +705,235 @@ describe("AGI-113 #2 — POST /agents/:id/webhooks records how to refresh a secr
     expect(store.getWebhookById(webhook_id)!.secrets_refresh).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// AGI-103 — an agent reads and rewrites its OWN webhook filters.
+//
+// Before this, changing a filter meant Tim hand-running sqlite against the
+// 0700 gateway DB. These two routes are the whole self-service surface; the
+// tests below are the contract the `wire` MCP plugin calls.
+// ---------------------------------------------------------------------------
+
+/** Sign a request the way a real agent's MCP plugin does (Ed25519 + body_hash). */
+async function agentJwt(agentId: string, privateKey: CryptoKey, body: string): Promise<string> {
+  const b64url = (buf: ArrayBuffer | Uint8Array) => {
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  };
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const header = b64url(new TextEncoder().encode(JSON.stringify({ alg: "EdDSA", typ: "JWT" })));
+  const payload = b64url(new TextEncoder().encode(JSON.stringify({ iss: agentId, iat: Math.floor(Date.now() / 1000), body_hash: bodyHash })));
+  const sig = await crypto.subtle.sign("Ed25519", privateKey, new TextEncoder().encode(`${header}.${payload}`));
+  return `${header}.${payload}.${b64url(sig)}`;
+}
+
+/** Register `id` on the test store with a real keypair and return the signer. */
+async function agentWithKey(id: string): Promise<CryptoKey> {
+  const kp = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair;
+  const rawPub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+  store.upsertAgent({ id, display_name: id, pubkey: btoa(String.fromCharCode(...rawPub)), permanent: false });
+  return kp.privateKey;
+}
+
+describe("AGI-103 — GET /agents/:id/webhooks lists the caller's OWN rows, without secrets", () => {
+  test("an agent sees its own rows and NOTHING from another agent", async () => {
+    const key = await agentWithKey("papassinos");
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    const mine = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-9", filter: `payload.action === "opened"` });
+    store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose" });
+
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks`, {
+      headers: { authorization: `Bearer ${await agentJwt("papassinos", key, "")}` },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { webhooks: Array<Record<string, unknown>> };
+    expect(json.webhooks.map((w) => w.id)).toEqual([mine]);
+    expect(json.webhooks[0].filter).toBe(`payload.action === "opened"`);
+    expect(json.webhooks[0].plugin).toBe("github");
+  });
+
+  test("an agent may NOT list another agent's webhooks", async () => {
+    const key = await agentWithKey("papassinos");
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose" });
+
+    const res = await fetch(`${baseUrl}/agents/cannoli/webhooks`, {
+      headers: { authorization: `Bearer ${await agentJwt("papassinos", key, "")}` },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test("secrets never appear in the listing — no secrets_map, webhook_secret, validator or cleanup code", async () => {
+    const res = await register({
+      plugin: "github", name: "pr-secretive",
+      webhook_secret: "shhh-hmac-secret",
+      cleanup: `await fetch("https://api.github.com/x", { method: "DELETE" })`,
+      meta: { repo: "agiterra/wire", github_token: "ghs-must-not-leak", nested: { slack_token: "xoxb-must-not-leak" } },
+    });
+    expect(res.status).toBe(200);
+
+    const list = await fetch(`${baseUrl}/agents/fondant/webhooks?token=${TOKEN}`);
+    const body = await list.text();
+    expect(list.status).toBe(200);
+    expect(body).not.toContain("shhh-hmac-secret");
+    expect(body).not.toContain("ghs-must-not-leak");
+    expect(body).not.toContain("xoxb-must-not-leak");
+    expect(body).not.toContain("api.github.com");
+    const json = JSON.parse(body) as { webhooks: Array<Record<string, any>> };
+    const row = json.webhooks.find((w) => w.name === "pr-secretive")!;
+    expect(row).toBeDefined();
+    expect(row.secrets_map).toBeUndefined();
+    expect(row.cleanup).toBeUndefined();
+    expect(row.validator).toBeUndefined();
+    expect(row.meta).toEqual({ repo: "agiterra/wire", nested: {} });
+  });
+
+  test("the operator may list any agent's webhooks", async () => {
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    const id = store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose" });
+    const res = await fetch(`${baseUrl}/agents/cannoli/webhooks?token=${TOKEN}`);
+    expect(res.status).toBe(200);
+    const json = await res.json() as { webhooks: Array<{ id: number }> };
+    expect(json.webhooks.map((w) => w.id)).toEqual([id]);
+  });
+});
+
+describe("AGI-103 — PATCH /agents/:id/webhooks/:webhookId rewrites the filter", () => {
+  test("an agent sets its own filter, and the change is audited", async () => {
+    const captured: Array<Record<string, any>> = [];
+    const capturingLog = pino({ level: "info" }, {
+      write(line: string) { try { captured.push(JSON.parse(line)); } catch {} },
+    } as any);
+    const emitter2 = new MessageEmitter();
+    const router2 = new Router(store, emitter2, capturingLog);
+    const server2 = createServer({
+      port: 0, store, router: router2, emitter: emitter2, log: capturingLog,
+      heartbeats: new HeartbeatScheduler(store, router2, capturingLog),
+    });
+    try {
+      const key = await agentWithKey("papassinos");
+      const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-10", filter: "true" });
+      const body = JSON.stringify({ filter: `payload.action === "opened"` });
+
+      const res = await fetch(`http://localhost:${server2.port}/agents/papassinos/webhooks/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        webhook_id: id, filter: `payload.action === "opened"`, previous_filter: "true",
+      });
+      expect(store.getWebhookById(id)!.filter).toBe(`payload.action === "opened"`);
+
+      const audit = captured.find((l) => l.event === "webhook_filter_changed");
+      expect(audit).toBeDefined();
+      expect(audit!.agent).toBe("papassinos");
+      expect(audit!.webhook_id).toBe(id);
+      expect(audit!.old_filter).toBe("true");
+      expect(audit!.new_filter).toBe(`payload.action === "opened"`);
+      expect(audit!.changed_by).toBe("papassinos");
+    } finally {
+      server2.stop(true);
+    }
+  });
+
+  test("filter: null clears it — an unfiltered webhook receives everything", async () => {
+    const key = await agentWithKey("papassinos");
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-11", filter: "false" });
+    const body = JSON.stringify({ filter: null });
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(store.getWebhookById(id)!.filter).toBeNull();
+  });
+
+  test("an unparseable filter is rejected 400 with the error text, and the stored filter is untouched", async () => {
+    const key = await agentWithKey("papassinos");
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-12", filter: "true" });
+    const body = JSON.stringify({ filter: `payload.action === (((` });
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+      body,
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json() as { error: string };
+    expect(json.error).toStartWith("invalid filter:");
+    expect(json.error.length).toBeGreaterThan("invalid filter:".length + 1);
+    expect(store.getWebhookById(id)!.filter).toBe("true");
+  });
+
+  test("a filter that THROWS on a sample envelope is rejected 400 (it would silently fail closed on every delivery)", async () => {
+    const key = await agentWithKey("papassinos");
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-13", filter: "true" });
+    const body = JSON.stringify({ filter: `payloadd.action === "opened"` }); // typo → ReferenceError
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+      body,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("payloadd");
+    expect(store.getWebhookById(id)!.filter).toBe("true");
+  });
+
+  test("a realistic deep-property filter is NOT rejected (the sample envelope is permissive)", async () => {
+    const key = await agentWithKey("papassinos");
+    const id = store.createWebhook({ agentId: "papassinos", plugin: "github", name: "pr-14" });
+    const expr = `payload.pull_request.number === 1355 && headers["x-github-event"] === "pull_request" && payload.labels.map(l => l.name).includes("bug")`;
+    const body = JSON.stringify({ filter: expr });
+    const res = await fetch(`${baseUrl}/agents/papassinos/webhooks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(store.getWebhookById(id)!.filter).toBe(expr);
+  });
+
+  test("a webhook that belongs to another agent is 409, naming the owner (AGI-113 shape)", async () => {
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    const id = store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose", filter: "true" });
+
+    // Same authenticated operator, wrong agent in the path.
+    const res = await fetch(`${baseUrl}/agents/fondant/webhooks/${id}?token=${TOKEN}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filter: "false" }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "webhook owned by cannoli" });
+    expect(store.getWebhookById(id)!.filter).toBe("true");
+  });
+
+  test("an agent may not PATCH under another agent's id even when the row is that agent's", async () => {
+    const key = await agentWithKey("papassinos");
+    store.upsertAgent({ id: "cannoli", display_name: "cannoli", pubkey: "pk-c", permanent: false });
+    const id = store.createWebhook({ agentId: "cannoli", plugin: "slack", name: "firehose", filter: "true" });
+    const body = JSON.stringify({ filter: "false" });
+    const res = await fetch(`${baseUrl}/agents/cannoli/webhooks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await agentJwt("papassinos", key, body)}` },
+      body,
+    });
+    expect(res.status).toBe(403);
+    expect(store.getWebhookById(id)!.filter).toBe("true");
+  });
+
+  test("a webhook id that does not exist is 404 'webhook not found'", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/webhooks/999999?token=${TOKEN}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filter: "true" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "webhook not found" });
+  });
+});

@@ -15,6 +15,8 @@
  *   GET  /agents/:id/peek                — read agent's screen output (operator only)
  *   POST /agents/:id/message             — send IPC message to agent (operator only)
  *   POST /agents/:id/webhooks            — register webhook for agent
+ *   GET  /agents/:id/webhooks            — list the agent's own webhooks (no secrets)
+ *   PATCH /agents/:id/webhooks/:webhookId — rewrite the agent's own webhook filter
  *   POST /webhooks/:agent/:plugin        — inbound webhook delivery
  *   GET  /oauth/fondant/linear/callback  — durable Linear OAuth app redirect
  *   GET  /oauth/brioche/linear/callback  — durable Linear OAuth app redirect
@@ -39,7 +41,7 @@ import {
 } from "./auth.js";
 import { verifyRegistrationResponse, verifyAuthenticationResponse } from "@simplewebauthn/server";
 import type { Logger } from "pino";
-import { evaluateFilter, evaluateExpression, validateFilter } from "./filter.js";
+import { evaluateFilter, evaluateExpression, validateFilter, checkFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { peekAgentScreen, type PeekAgent, type PeekResult } from "./peek-screen.js";
 import { loadSecretProviders, refreshSecrets } from "./secret-providers.js";
@@ -364,7 +366,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   // Cache raw body text so signature verification works after c.req.json()
   app.use("*", async (c, next) => {
-    if (c.req.method === "POST" || c.req.method === "PUT" || c.req.method === "DELETE") {
+    // PATCH joined this list for AGI-103: a PATCH body that isn't cached here
+    // is verified against "" and every signed PATCH fails "body hash mismatch".
+    if (c.req.method === "POST" || c.req.method === "PUT" || c.req.method === "DELETE" || c.req.method === "PATCH") {
       (c as any).set("rawBody", await c.req.raw.clone().text());
     }
     await next();
@@ -478,6 +482,31 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     } catch (e: any) {
       return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
     }
+  }
+
+  /**
+   * Require operator auth, or a JWT signed by THE AGENT NAMED IN THE PATH.
+   *
+   * requireAgentOrOperator() accepts a JWT from any registered agent whatever
+   * `:id` says — fine for registering a hook under your own name, wrong for
+   * reading or rewriting rows, where the path id is the only thing deciding
+   * whose data you touch. AGI-103's routes are agent-scoped by identity, not
+   * by the path: an agent reaches its own webhooks and no one else's; the
+   * operator still addresses any id.
+   */
+  async function requireSelfOrOperator(c: Context, agentId: string): Promise<Response | null> {
+    if (isOperator(c)) return null;
+    return requireAgent(c, agentId);
+  }
+
+  /** Who to name in an audit line. The gate above has already proved this. */
+  function auditActor(c: Context, agentId: string): string {
+    if (isOperator(c)) {
+      const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+      const operator = operatorId ? store.getOperator(operatorId) : null;
+      return operator ? `operator:${operator.display_name}` : "operator";
+    }
+    return agentId;
   }
 
   /**
@@ -1221,6 +1250,126 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       url: `/webhooks/${agentId}/${plugin}/${name}`,
       registered: true,
     });
+  });
+
+  // --- Webhook Self-Service (AGI-103) ---
+  //
+  // Until now, changing a webhook filter meant hand-running sqlite against the
+  // 0700 gateway DB. These two routes let the agent whose webhook it is read
+  // and rewrite its own filter, and are what the `wire` MCP plugin calls.
+
+  /** Keys we refuse to echo out of `meta`, at any depth. */
+  const SECRETISH_KEY = /secret|token|password|passwd|credential|api[_\-]?key|signature|bearer/i;
+
+  /**
+   * `meta` is caller-supplied JSON and plugins have been known to stash a
+   * token in it, so it is filtered by key rather than trusted wholesale. The
+   * columns that are ALWAYS secret — secrets_map, validator and cleanup, the
+   * last of which is executable code with the credentials in scope — are
+   * simply never selected into the response shape below.
+   */
+  function redactMeta(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(redactMeta);
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (SECRETISH_KEY.test(k)) continue;
+        out[k] = redactMeta(v);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  /** The only webhook shape that leaves the gateway on a read. */
+  function publicWebhookRow(w: Webhook) {
+    let meta: unknown = null;
+    if (w.meta) {
+      // Unparseable meta is dropped rather than echoed — we cannot filter what
+      // we cannot read, and a raw string could be anything.
+      try { meta = redactMeta(JSON.parse(w.meta)); } catch { meta = null; }
+    }
+    return {
+      id: w.id,
+      agent_id: w.agent_id,
+      plugin: w.plugin,
+      name: w.name,
+      filter: w.filter,
+      dedup: w.dedup,
+      created_at: w.created_at,
+      meta,
+    };
+  }
+
+  app.get("/agents/:id/webhooks", async (c) => {
+    const agentId = c.req.param("id");
+
+    const err = await requireSelfOrOperator(c, agentId);
+    if (err) return err;
+
+    return c.json({ webhooks: store.getWebhooksForAgent(agentId).map(publicWebhookRow) });
+  });
+
+  app.patch("/agents/:id/webhooks/:webhookId", async (c) => {
+    const agentId = c.req.param("id");
+    const webhookId = parseInt(c.req.param("webhookId"), 10);
+
+    const err = await requireSelfOrOperator(c, agentId);
+    if (err) return err;
+
+    const webhook = store.getWebhookById(webhookId);
+    if (!webhook) {
+      return c.json({ error: "webhook not found" }, 404);
+    }
+    // Same distinction AGI-113 #3 drew on DELETE: a row that exists under
+    // another agent is not "not found", and naming the owner is the point.
+    if (webhook.agent_id !== agentId) {
+      return c.json({ error: `webhook owned by ${webhook.agent_id}` }, 409);
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    if (!body || typeof body !== "object" || !("filter" in body)) {
+      return c.json({ error: "missing 'filter' (send null or \"\" to clear it)" }, 400);
+    }
+    const requested = body.filter;
+    if (requested !== null && typeof requested !== "string") {
+      return c.json({ error: `'filter' must be a string or null. Got: ${JSON.stringify(requested)}` }, 400);
+    }
+
+    // null and whitespace both mean "clear it" — evaluateFilter reads an empty
+    // filter as match-all, so a cleared row receives every delivery.
+    const next = requested === null || requested.trim() === "" ? null : requested.trim();
+
+    if (next !== null) {
+      // Compile and smoke-run it exactly as the delivery path will. A filter
+      // that throws at delivery is swallowed by evaluateFilter and treated as
+      // no-match — the webhook goes quiet and looks healthy. Reject it here.
+      const filterErr = checkFilter(next);
+      if (filterErr) {
+        return c.json({ error: `invalid filter: ${filterErr}` }, 400);
+      }
+    }
+
+    const previous = webhook.filter;
+    store.setWebhookFilter(webhookId, next);
+    log.info(
+      {
+        event: "webhook_filter_changed",
+        agent: webhook.agent_id,
+        webhook_id: webhookId,
+        old_filter: previous,
+        new_filter: next,
+        changed_by: auditActor(c, agentId),
+      },
+      `webhook ${webhookId} filter changed`,
+    );
+
+    return c.json({ webhook_id: webhookId, filter: next, previous_filter: previous });
   });
 
   app.delete("/agents/:id/webhooks/:webhookId", async (c) => {

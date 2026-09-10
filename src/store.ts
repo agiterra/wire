@@ -1055,6 +1055,19 @@ export class Store {
   }
 
   /**
+   * Replace a webhook's filter expression (AGI-103 — agents self-manage their
+   * own filters through PATCH /agents/:id/webhooks/:webhookId).
+   *
+   * `null` CLEARS the filter, which means the row receives every delivery:
+   * evaluateFilter() treats null/empty as match-all. Ownership and the
+   * validity of the expression are the route's job — by the time a filter
+   * reaches here it has already been compiled and smoke-run.
+   */
+  setWebhookFilter(id: number, filter: string | null): void {
+    this.db.prepare("UPDATE webhooks SET filter = ? WHERE id = ?").run(filter, id);
+  }
+
+  /**
    * Ephemeral agents' webhooks whose owner has no session that heartbeated
    * within `staleMs`. Permanent agents are excluded — their webhook URLs are
    * advertised to external services (Slack, GitHub, etc.) and must survive
