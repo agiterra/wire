@@ -610,10 +610,13 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const h = j.host || null;
         let hostCell = usageCell('Host', 'unknown', [['mem', '—', ''], ['swap', '—', ''], ['disk', '—', '']], 'no host meter');
         if (h && h.mem) {
-          const swp = pctNum((h.swap || {}).used_pct), mf = pctNum((h.mem || {}).free_pct), dfree = (h.disk || {}).free_gb;
-          const hstate = (swp !== null && swp >= 50) || (mf !== null && mf < 15) || (dfree !== undefined && dfree < 20) ? 'red' : ((swp !== null && swp >= 25) || (mf !== null && mf < 30) || (dfree !== undefined && dfree < 40) ? 'amber' : 'ok');
+          // Swap is judged in ABSOLUTE MB, not %: macOS grows and shrinks the swapfile, so used% is a ratio over a moving
+          // denominator (2026-09-10: 2.3 GB used read as 73% right after the file shrank from 7 GB to 3 GB). Tim's target
+          // is "swap becomes a rare occurrence" — red at ≥4 GB used, amber at ≥1 GB.
+          const swpMb = Number((h.swap || {}).used_mb); const swp = pctNum((h.swap || {}).used_pct), mf = pctNum((h.mem || {}).free_pct), dfree = (h.disk || {}).free_gb;
+          const hstate = (swpMb >= 4096) || (mf !== null && mf < 15) || (dfree !== undefined && dfree < 20) ? 'red' : ((swpMb >= 1024) || (mf !== null && mf < 30) || (dfree !== undefined && dfree < 40) ? 'amber' : 'ok');
           hostCell = usageCell('Host', hstate,
-            [['mem used', fmt(pctNum((h.mem || {}).used_pct)), (h.mem || {}).total_gb + ' GB'], ['swap', fmt(swp), ((h.swap || {}).used_mb || 0) + ' / ' + ((h.swap || {}).total_mb || 0) + ' MB'], ['disk free', (dfree === undefined ? '—' : dfree + ' GB'), ((h.disk || {}).used_pct || '') + '% used']],
+            [['mem used', fmt(pctNum((h.mem || {}).used_pct)), (h.mem || {}).total_gb + ' GB'], ['swap', (isFinite(swpMb) ? (swpMb / 1024).toFixed(1) + ' GB' : fmt(swp)), 'used ' + ((h.swap || {}).used_mb || 0) + ' of a ' + ((h.swap || {}).total_mb || 0) + ' MB swapfile (' + fmt(swp) + ') — red ≥4 GB, amber ≥1 GB'], ['disk free', (dfree === undefined ? '—' : dfree + ' GB'), ((h.disk || {}).used_pct || '') + '% used']],
             hostNote(h), true);
         }
         const pl = j.pool || null;
