@@ -857,6 +857,17 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       pubkeyMatch: existing ? existing.pubkey === pubkey : null,
     }, `REGISTER ${id} via ${authPath}`);
 
+    // ⛔ PROMOTION TO PERMANENT IS OPERATOR-ONLY, WHATEVER PATH AUTHENTICATED THE CALL (2026-09-24, Fondant).
+    // The upsert raises `permanent` whenever the body asks for it. The new-permanent branch above requires the
+    // operator, but the ephemeral-reregister branch accepts the agent's OWN JWT (or any permanent sponsor), and the
+    // reaped-readmission branch the agent's own key — so an ephemeral lane could re-register itself with
+    // permanent:true, become permanent, and sponsor new agents (sponsor_not_permanent exists to stop exactly that).
+    // An existing permanent row re-asserting permanent:true is not a promotion and stays allowed.
+    if (permanent && !existing?.permanent) {
+      const err = requireOperator(c);
+      if (err) return err;
+    }
+
     store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent, pronouns, kind, ssh_host, run_as_uid, screen_name });
 
     return c.json({ agent_id: id, registered: true }, 201);
