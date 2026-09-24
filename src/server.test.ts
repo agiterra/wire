@@ -505,6 +505,42 @@ describe("POST /agents/register — only PERMANENT agents (personai) may sponsor
     expect(row?.reaped_at).toBeNull();
   });
 
+  // ⛔ 2026-09-24: promotion to permanent is operator-only on EVERY path — before this, an ephemeral could
+  // re-register ITSELF with permanent:true (own JWT, ephemeral-reregister branch) and then sponsor new agents.
+  test("an ephemeral re-registering ITSELF with permanent:true is refused and stays ephemeral", async () => {
+    const priv = await makeSponsor("lane-x", false);
+    const pk = store.getAgent("lane-x")!.pubkey;
+    const res = await signedRegister(priv, "lane-x", { id: "lane-x", display_name: "lane-x", pubkey: pk, permanent: true });
+    expect(res.status).toBe(401); // same convention as the new-permanent branch: operator auth required
+    expect(((await res.json()) as { error?: string }).error).toContain("operator");
+    expect(store.getAgent("lane-x")?.permanent).toBeFalsy();
+  });
+
+  test("a PERMANENT sponsor cannot promote an existing ephemeral either (promotion is operator-only)", async () => {
+    const priv = await makeSponsor("director", true);
+    store.upsertAgent({ id: "lane-y", display_name: "lane-y", pubkey: "pk-y", permanent: false });
+    const res = await signedRegister(priv, "director", { id: "lane-y", display_name: "lane-y", pubkey: "pk-y", permanent: true });
+    expect(res.status).toBe(401); // same convention as the new-permanent branch: operator auth required
+    expect(((await res.json()) as { error?: string }).error).toContain("operator");
+    expect(store.getAgent("lane-y")?.permanent).toBeFalsy();
+  });
+
+  test("ACCEPT: an ephemeral re-registering itself WITHOUT permanent still works", async () => {
+    const priv = await makeSponsor("lane-z", false);
+    const pk = store.getAgent("lane-z")!.pubkey;
+    const res = await signedRegister(priv, "lane-z", { id: "lane-z", display_name: "lane-z renamed", pubkey: pk });
+    expect(res.status).toBe(201);
+    expect(store.getAgent("lane-z")?.display_name).toBe("lane-z renamed");
+  });
+
+  test("ACCEPT: a permanent agent re-asserting permanent:true on itself is not a promotion", async () => {
+    const priv = await makeSponsor("persona-p", true);
+    const pk = store.getAgent("persona-p")!.pubkey;
+    const res = await signedRegister(priv, "persona-p", { id: "persona-p", display_name: "persona-p", pubkey: pk, permanent: true });
+    expect(res.status).toBe(201);
+    expect(store.getAgent("persona-p")?.permanent).toBeTruthy();
+  });
+
   test("reaped permanent + new pubkey without force_rotate is 409", async () => {
     const priv = await makeSponsor("director", true);
     store.upsertAgent({ id: "gaia", display_name: "Gaia", pubkey: "pk-old", permanent: true });
