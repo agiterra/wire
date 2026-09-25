@@ -1771,7 +1771,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const err = await requireAgentOrOperator(c);
     if (err) return err;
     const id = c.req.param("id");
-    heartbeats.remove(id);
+    // 404 when nothing matched: a client that sent the wrong field got 'heartbeat deleted: undefined' and a success,
+    // while the heartbeat stayed (Baguette 2026-09-25, hb-9edf71a8). Every client already throws on !res.ok.
+    const removed = heartbeats.remove(id);
+    if (!removed) return c.json({ error: `no heartbeat '${id}'` }, 404);
     return c.json({ deleted: id });
   });
 

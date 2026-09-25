@@ -104,15 +104,16 @@ export class HeartbeatScheduler {
     return hb;
   }
 
-  /** Remove a heartbeat, stop its schedule, delete from DB. */
-  remove(id: string): void {
+  /** Remove a heartbeat, stop its schedule, delete from DB. Returns false when no such heartbeat existed. */
+  remove(id: string): boolean {
     const task = this.tasks.get(id);
     if (task) {
       task.stop();
       this.tasks.delete(id);
     }
-    this.store.deleteHeartbeat(id);
-    this.log.info({ event: "heartbeat_removed", id }, `removed: ${id}`);
+    const removed = this.store.deleteHeartbeat(id) > 0;
+    this.log.info({ event: removed ? "heartbeat_removed" : "heartbeat_remove_miss", id }, removed ? `removed: ${id}` : `no such heartbeat: ${id}`);
+    return removed;
   }
 
   /** Remove all heartbeats for an agent. */

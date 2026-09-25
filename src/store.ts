@@ -1422,8 +1422,9 @@ export class Store {
     ).run(Date.now(), id);
   }
 
-  deleteHeartbeat(id: string): void {
-    this.db.prepare("DELETE FROM heartbeats WHERE id = ?").run(id);
+  /** Returns how many rows were deleted (0 = no such heartbeat), so callers can refuse instead of claiming success. */
+  deleteHeartbeat(id: string): number {
+    return this.db.prepare("DELETE FROM heartbeats WHERE id = ?").run(id).changes;
   }
 
   deleteHeartbeatsForAgent(agentId: string): void {
