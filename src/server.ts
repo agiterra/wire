@@ -897,14 +897,22 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (store.clearReap(agentId)) {
       log.info({ event: "agent_un_greyed", agent: agentId, via: "connect" }, `agent ${agentId} → connected (un-greyed)`);
     }
-    // cc_session_id identifies the Claude Code session (survives SSE reconnects)
-    const session = store.createSession(agentId, "claude-code", body.cc_session_id);
+    // cc_session_id identifies the Claude Code session (survives SSE reconnects).
+    // auxiliary:true = a helper stream (RPC reply listener) under this identity: it starts at the
+    // head and its acks never move the agent's replay cursor (store.createSession / ackSession).
+    const auxiliary = body.auxiliary === true;
+    const session = store.createSession(agentId, "claude-code", body.cc_session_id, { auxiliary });
+    if (auxiliary) {
+      log.info({ event: "session_auxiliary", agentId, sessionId: session.id, cc_session_id: session.cc_session_id, fromSeq: session.last_ack_seq }, "auxiliary session: starts at head, acks do not advance the agent cursor");
+    }
     notifyDashboard();
 
     return c.json({
       session_id: session.id,
       cc_session_id: session.cc_session_id,
       last_ack_seq: session.last_ack_seq,
+      // Echoed so a client can tell an honouring broker from one that ignored the field.
+      auxiliary: session.auxiliary === 1,
     });
   });
 
