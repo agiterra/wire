@@ -256,6 +256,8 @@ export type AgentSession = {
   last_heartbeat: number | null;
   status: SessionStatus;
   cc_session_id: string | null;
+  /** 1 = auxiliary helper stream (see createSession). */
+  auxiliary: number;
 };
 
 export type Webhook = {
@@ -360,6 +362,13 @@ export class Store {
     // Add cc_session_id column — identifies the Claude Code session (survives SSE reconnects)
     if (!sessionCols.some((c) => c.name === "cc_session_id")) {
       this.db.exec("ALTER TABLE agent_sessions ADD COLUMN cc_session_id TEXT");
+    }
+
+    // Add auxiliary column — 1 for a helper stream that shares the agent's identity but is
+    // not its conversation (an RPC reply listener). Its acks move only its own cursor, never
+    // agents.last_seen_seq; see ackSession.
+    if (!sessionCols.some((c) => c.name === "auxiliary")) {
+      this.db.exec("ALTER TABLE agent_sessions ADD COLUMN auxiliary INTEGER NOT NULL DEFAULT 0");
     }
 
     // Add source_cc_session to messages — sender's CC session for reply targeting
@@ -832,9 +841,26 @@ export class Store {
 
   // --- Sessions ---
 
-  createSession(agentId: string, runtime = "claude-code", contextId?: string): AgentSession {
+  createSession(
+    agentId: string,
+    runtime = "claude-code",
+    contextId?: string,
+    options: { auxiliary?: boolean } = {},
+  ): AgentSession {
     const id = crypto.randomUUID();
     const now = Date.now();
+    if (options.auxiliary) {
+      // An AUXILIARY session (an RPC reply listener sharing the agent's identity) starts at the
+      // current head: the agent's queued backlog is for its conversation session, and a helper
+      // that connects first after a restart must not be handed it. A reconnect of THIS session
+      // (same session id) still replays from its own last_ack_seq, so a reply sent during a
+      // stream flap is not lost.
+      this.db.prepare(`
+        INSERT INTO agent_sessions (id, agent_id, runtime, connected_at, last_ack_seq, updated_at, last_heartbeat, status, cc_session_id, auxiliary)
+        VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) FROM messages), ?, ?, 'connected', ?, 1)
+      `).run(id, agentId, runtime, now, now, now, contextId ?? null);
+      return this.getSession(id)!;
+    }
     // Inherit the cursor from agents.last_seen_seq — the per-agent persisted
     // watermark — NOT from agent_sessions, which gets purged after
     // disconnectMs and would strand the cursor. Also NOT from global MAX(seq),
@@ -897,8 +923,11 @@ export class Store {
     ).run(seq, now, sessionId);
     // Write-through to agents.last_seen_seq so the cursor survives session
     // purge — createSession reads from agents on next reconnect.
+    // ⛔ NOT from an auxiliary session (2026-09-29, j:1935): a persona's RPC helpers connect ~1 s
+    // before its channel session after a restart, replayed the queued IPC, acked it, and moved
+    // this per-AGENT cursor past it, so the conversation session never saw it.
     this.db.prepare(
-      "UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = (SELECT agent_id FROM agent_sessions WHERE id = ?)"
+      "UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = (SELECT agent_id FROM agent_sessions WHERE id = ? AND auxiliary = 0)"
     ).run(seq, sessionId);
   }
 

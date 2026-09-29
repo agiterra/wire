@@ -214,3 +214,67 @@ describe("AGI-113 #4 — no cleanup-bypassing bulk webhook delete on the Store",
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}
   });
 });
+
+describe("auxiliary sessions (RPC helpers sharing an identity) — j:1935", () => {
+  // The 2026-09-29 incident: baguette restarted; a lane IPC arrived while no session was up; the
+  // bridge-rpc helper connected first, replayed + acked it, and moved agents.last_seen_seq past
+  // it, so the channel session connected 1.5 s later started beyond the queued message.
+  function incident(helperAuxiliary: boolean) {
+    registerAgent("baguette");
+    const old = store.createSession("baguette");
+    const live = postMessage("brioche", "baguette", "ipc", { text: "before restart" });
+    store.ackSession(old.id, live);
+    store.disconnectSession(old.id);
+
+    const queued = postMessage("rv-4492-sg59", "baguette", "ipc", { text: "sent during restart" });
+
+    const helper = store.createSession("baguette", "claude-code", "bridge-rpc-baguette", { auxiliary: helperAuxiliary });
+    // Whatever the helper is handed, it acks (the RPC client acks every frame it receives).
+    for (const m of store.getMessagesForAgent("baguette", helper.last_ack_seq, 100)) store.ackSession(helper.id, m.seq);
+    const reply = postMessage("crew-svc@patisserie", "baguette", "rpc.reply", {});
+    store.ackSession(helper.id, reply);
+
+    const channel = store.createSession("baguette", "claude-code", "7a333c61");
+    return { queued, reply, helper, channel };
+  }
+
+  test("an auxiliary helper connecting first leaves the queued IPC for the channel session", () => {
+    const { queued, channel } = incident(true);
+    const backlog = store.getMessagesForAgent("baguette", channel.last_ack_seq, 100).map((m) => m.seq);
+    expect(backlog).toContain(queued);
+  });
+
+  test("control: a NON-auxiliary helper reproduces the loss (proves the test can fail)", () => {
+    const { queued, channel } = incident(false);
+    const backlog = store.getMessagesForAgent("baguette", channel.last_ack_seq, 100).map((m) => m.seq);
+    expect(backlog).not.toContain(queued);
+  });
+
+  test("an auxiliary session starts at the head: it is never handed the agent's backlog", () => {
+    registerAgent("brioche");
+    postMessage("x", "brioche", "ipc", { text: "queued for the conversation" });
+    const helper = store.createSession("brioche", "claude-code", "crew-tools-rpc-1", { auxiliary: true });
+    expect(helper.auxiliary).toBe(1);
+    expect(store.getMessagesForAgent("brioche", helper.last_ack_seq, 100)).toEqual([]);
+  });
+
+  test("an auxiliary session's own cursor still advances (flap replay of its RPC replies works)", () => {
+    registerAgent("vacherin");
+    const helper = store.createSession("vacherin", "claude-code", "crew-tools-rpc-2", { auxiliary: true });
+    const r1 = postMessage("crew-svc", "vacherin", "rpc.reply", {});
+    store.ackSession(helper.id, r1);
+    const r2 = postMessage("crew-svc", "vacherin", "rpc.reply", {});
+    expect(store.getSession(helper.id)!.last_ack_seq).toBe(r1);
+    expect(store.getMessagesForAgent("vacherin", store.getSession(helper.id)!.last_ack_seq, 100).map((m) => m.seq)).toEqual([r2]);
+  });
+
+  test("a normal session still writes through to agents.last_seen_seq", () => {
+    registerAgent("herald");
+    const s = store.createSession("herald");
+    const seq = postMessage("x", "herald", "ipc", {});
+    store.ackSession(s.id, seq);
+    const next = store.createSession("herald");
+    expect(next.last_ack_seq).toBe(seq);
+    expect(next.auxiliary).toBe(0);
+  });
+});
