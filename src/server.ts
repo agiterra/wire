@@ -367,6 +367,36 @@ export function slimGithubPayload(body: unknown): unknown {
   return p;
 }
 
+/** Linear description excerpt length (Baguette 648166, Brioche 648159: id + title + state + a short excerpt). */
+export const LINEAR_DESCRIPTION_CAP = 200;
+
+/**
+ * Trim a Linear webhook body for delivery (see the webhook route). Pure; unknown shapes pass through; never mutates its
+ * input (filters and dedup run on the original). Measured 2026-10-01 on baguette's last 24 h: 61 deliveries, 803 KB, of
+ * which 457 KB (56 %) was data.descriptionData — the editor's ProseMirror JSON of `description`, a lossless duplicate of
+ * the text beside it — and 103 KB the description itself. Both ride on every Issue event. Kept: every other field
+ * (identifier, title, state, url, labels, assignee …) and Comment bodies whole (the comment IS the signal).
+ */
+export function slimLinearPayload(body: unknown): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const p = { ...(body as Record<string, unknown>) };
+  const data = p.data && typeof p.data === "object" && !Array.isArray(p.data) ? (p.data as Record<string, unknown>) : undefined;
+  const ref = (typeof data?.identifier === "string" && data.identifier) || (typeof data?.id === "string" && data.id) || "";
+  const slim = (o: unknown): unknown => {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return o;
+    const c = { ...(o as Record<string, unknown>) };
+    delete c.descriptionData;
+    if (typeof c.description === "string" && c.description.length > LINEAR_DESCRIPTION_CAP) {
+      const more = c.description.length - LINEAR_DESCRIPTION_CAP;
+      c.description = c.description.slice(0, LINEAR_DESCRIPTION_CAP) + ` …[${more} more chars trimmed by the Wire gateway — Linear get_issue ${ref} for the full text]`;
+    }
+    return c;
+  };
+  if (data) p.data = slim(data);
+  if (p.updatedFrom) p.updatedFrom = slim(p.updatedFrom);   // an edit carries the OLD description + descriptionData too
+  return p;
+}
+
 export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPlugins = [], peekScreen = peekAgentScreen }: ServerDeps) {
   _serverLog = log;
   const serverPluginByAgentId = new Map(serverPlugins.map((p) => [p.agentId, p]));
@@ -1590,7 +1620,8 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     // comment) and the full repository/organization objects three times — 25–42 KB per delivery,
     // measured 504 KB → 172 KB over 20 real events (cartellata, 2026-09-04). Filters keep working
     // on the original; only the delivered copy is slimmed. Every kept key is one lanes read.
-    const deliveredPayload = plugin === "github" ? slimGithubPayload(parsedBody) : parsedBody;
+    // Linear deliveries likewise (slimLinearPayload): descriptionData dropped, description excerpted.
+    const deliveredPayload = plugin === "github" ? slimGithubPayload(parsedBody) : plugin === "linear" ? slimLinearPayload(parsedBody) : parsedBody;
     // Webhook-driven trigger: a github PUSH touches a per-repo-branch marker (mtime = last push) so a
     // WatchPaths launchd can react immediately (fabrica-root-sync on fabrica-v3 main — lanes read skills
     // from the shared tree, so a poll-only sync leaves them on stale process; Brioche 2026-09-07). Generic,

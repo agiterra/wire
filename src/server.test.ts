@@ -998,3 +998,24 @@ describe("AGI-103 follow-up — DELETE /agents/:id/webhooks/:webhookId is bound 
     expect(store.getWebhookById(id)).toBeNull();
   });
 });
+
+describe("inbound webhook — Linear deliveries are slimmed; filters still see the full body", () => {
+  // The wiring, not just the pure function (a mutant that dropped `plugin === "linear" ? slimLinearPayload(...)` from the
+  // route survived the unit tests). The filter REQUIRES descriptionData: if filters ran on the slimmed copy, nothing
+  // would be stored at all.
+  test("stored envelope has no descriptionData and an excerpted description; filter matched on the original", async () => {
+    const reg = await register({ plugin: "linear", name: "issues", validator: `return { source: "linear", topic: "webhook.linear" };`,
+      filter: `typeof payload.data.descriptionData === "string"` });
+    expect(reg.status).toBeLessThan(300);
+    const body = { action: "create", type: "Issue", data: { id: "u-1", identifier: "ENG-9", title: "t", state: { name: "Todo" },
+      description: "D".repeat(1000), descriptionData: JSON.stringify({ type: "doc", content: [{ text: "x".repeat(5000) }] }) } };
+    const res = await fetch(`${baseUrl}/webhooks/fondant/linear/issues`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(res.status).toBe(200);
+    const msgs = store.getMessagesForAgent("fondant", 0, 10).filter((m) => m.topic === "webhook.linear");
+    expect(msgs.length).toBe(1);
+    const env = JSON.parse(msgs[0].payload) as { payload: { data: Record<string, unknown> } };
+    expect(env.payload.data.descriptionData).toBeUndefined();
+    expect(String(env.payload.data.description)).toContain("800 more chars trimmed by the Wire gateway — Linear get_issue ENG-9");
+    expect(env.payload.data.identifier).toBe("ENG-9");
+  });
+});
