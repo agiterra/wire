@@ -85,6 +85,35 @@ describe("sponsored re-register of a LIVE ephemeral (enforce)", () => {
     expect((await register(own.priv, "eph", { id: "eph", display_name: "e", pubkey: own.pub })).status).toBeLessThan(300);
   });
 
+  test("a REUSED sponsor token on a SECOND request is still rejected as a replay", async () => {
+    const sponsor = await keypair();
+    store.upsertAgent({ id: "fondant", display_name: "fondant", pubkey: sponsor.pub, permanent: true });
+    const first = await keypair();
+    expect((await register(sponsor.priv, "fondant", { id: "wallet-vault-y", display_name: "v", pubkey: first.pub, kind: "integration", force_rotate: true })).status).toBeLessThan(300);
+    // One token, sent twice: the first use must pass, the second must be refused as a replay.
+    const body = JSON.stringify({ id: "wallet-vault-y", display_name: "v", pubkey: (await keypair()).pub, kind: "integration", force_rotate: true });
+    const tok = await token(sponsor.priv, "fondant", body);
+    const send = () => fetch(`${baseUrl}/agents/register`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${tok}` }, body });
+    expect((await send()).status).toBeLessThan(300);
+    const again = await send();
+    expect(again.status).toBe(403);
+    expect(await again.text()).toContain("replay");
+  });
+
+  test("a REUSED self token on a SECOND request is still rejected as a replay", async () => {
+    const sponsor = await keypair();
+    store.upsertAgent({ id: "fondant", display_name: "fondant", pubkey: sponsor.pub, permanent: true });
+    const own = await keypair();
+    expect((await register(sponsor.priv, "fondant", { id: "eph-self", display_name: "e", pubkey: own.pub })).status).toBeLessThan(300);
+    const body = JSON.stringify({ id: "eph-self", display_name: "e", pubkey: own.pub });
+    const tok = await token(own.priv, "eph-self", body);
+    const send = () => fetch(`${baseUrl}/agents/register`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${tok}` }, body });
+    expect((await send()).status).toBeLessThan(300);
+    const again = await send();
+    expect(again.status).toBe(403);
+    expect(await again.text()).toContain("replay");
+  });
+
   test("an EPHEMERAL may not sponsor another live ephemeral's re-register", async () => {
     const sponsor = await keypair();
     store.upsertAgent({ id: "fondant", display_name: "fondant", pubkey: sponsor.pub, permanent: true });
