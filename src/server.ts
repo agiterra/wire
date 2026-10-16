@@ -502,8 +502,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const payload = auth.slice(7).split(".")[1];
     if (!payload) return null;
     try {
-      const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (payload.length % 4)) % 4));
-      const iss = JSON.parse(json)?.iss;
+      const iss = JSON.parse(new TextDecoder().decode(b64urlDecode(payload)))?.iss; // UTF-8, same as verifyJwt
       return typeof iss === "string" ? iss : null;
     } catch {
       return null; // malformed: falls through to the sponsor/operator verifier, which reports the real error

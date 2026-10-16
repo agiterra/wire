@@ -85,6 +85,16 @@ describe("sponsored re-register of a LIVE ephemeral (enforce)", () => {
     expect((await register(own.priv, "eph", { id: "eph", display_name: "e", pubkey: own.pub })).status).toBeLessThan(300);
   });
 
+  test("a live ephemeral with a NON-ASCII id re-registers itself (issuer decoded as UTF-8)", async () => {
+    const sponsor = await keypair();
+    store.upsertAgent({ id: "fondant", display_name: "fondant", pubkey: sponsor.pub, permanent: true });
+    const own = await keypair();
+    expect((await register(sponsor.priv, "fondant", { id: "café", display_name: "c", pubkey: own.pub })).status).toBeLessThan(300);
+    const r = await register(own.priv, "café", { id: "café", display_name: "c", pubkey: own.pub });
+    expect(await r.text()).not.toContain("sponsor_not_permanent");
+    expect(r.status).toBeLessThan(300);
+  });
+
   test("a REUSED sponsor token on a SECOND request is still rejected as a replay", async () => {
     const sponsor = await keypair();
     store.upsertAgent({ id: "fondant", display_name: "fondant", pubkey: sponsor.pub, permanent: true });
