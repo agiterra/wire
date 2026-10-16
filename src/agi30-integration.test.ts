@@ -2,8 +2,9 @@
  * AGI-30 integration — the PATCHED client's real token, against the PATCHED
  * gateway, under WIRE_JWT_MODE=enforce.
  *
- * Imports createAuthJwt from the patched wire-tools tree by absolute path, so
- * this is the actual client output and not a re-implementation of it.
+ * Imports createAuthJwt from @agiterra/wire-tools (a devDependency, pinned like
+ * the wire plugin), so this is the actual client output and not a
+ * re-implementation of it.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
@@ -19,7 +20,7 @@ import { resetReplayCache } from "./jwt-guard";
 import {
   createAuthJwt,
   generateKeyPair,
-} from "/Users/_ephemeral/work/sericaia/copy/wire-tools/src/crypto.ts";
+} from "@agiterra/wire-tools/crypto";
 
 let tmpDir: string;
 let store: Store;
