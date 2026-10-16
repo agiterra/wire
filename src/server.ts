@@ -495,6 +495,20 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   // --- Auth gates (return error Response or null for authorized) ---
 
   /** Require authenticated agent (JWT Bearer). */
+  /** The iss claim of the request's Bearer JWT, UNVERIFIED — for routing to a verifier only, never for auth. */
+  function jwtIssuer(c: Context): string | null {
+    const auth = c.req.header("authorization");
+    if (!auth?.startsWith("Bearer ")) return null;
+    const payload = auth.slice(7).split(".")[1];
+    if (!payload) return null;
+    try {
+      const iss = JSON.parse(new TextDecoder().decode(b64urlDecode(payload)))?.iss; // UTF-8, same as verifyJwt
+      return typeof iss === "string" ? iss : null;
+    } catch {
+      return null; // malformed: falls through to the sponsor/operator verifier, which reports the real error
+    }
+  }
+
   async function requireAgent(c: Context, agentId: string): Promise<Response | null> {
     const agent = store.getAgent(agentId);
     if (!agent) return c.json({ error: `agent '${agentId}' not registered` }, 404);
@@ -845,11 +859,16 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       authPath = "ephemeral-reregister";
       // Ephemeral agent re-registering while still alive — allow the agent
       // itself, or a PERMANENT sponsor (personai). An ephemeral may not sponsor.
-      const selfErr = await requireAgent(c, id);
-      if (selfErr) {
-        const sponsorErr = await requirePermanentAgentOrOperator(c);
-        if (sponsorErr) return sponsorErr;
-      }
+      // Route on the token's (unverified) issuer and run EXACTLY ONE verifier:
+      // verifyJwt records the jti, so trying requireAgent first and falling back
+      // to the sponsor check verified the same token twice and the fallback
+      // always failed "replay: jti … already spent" under enforce (sponsored
+      // wallet-vault re-enrol, 2026-10-16). The chosen verifier still checks the
+      // signature, so a forged iss gains nothing.
+      const err = jwtIssuer(c) === id
+        ? await requireAgent(c, id)
+        : await requirePermanentAgentOrOperator(c);
+      if (err) return err;
     } else if (permanent) {
       authPath = "new-permanent";
       // New permanent agent — operator only
