@@ -1048,6 +1048,25 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     return c.json({ agent_id: agentId, minutes, count: messages.length, messages });
   });
 
+  // An agent's OWN sent messages after a seq (metadata only). Own JWT or operator: the caller already knows
+  // what it sent, so this leaks nothing; another agent's outbox stays private (403).
+  app.get("/agents/:id/sent", async (c) => {
+    const agentId = c.req.param("id");
+    if (!isOperator(c)) {
+      const err = await requireAgent(c, agentId);
+      if (err) return err;
+    } else if (!store.getAgent(agentId)) {
+      return c.json({ error: `agent '${agentId}' not registered` }, 404);
+    }
+    const afterSeq = Number(c.req.query("after_seq") ?? "0");
+    const limit = Number(c.req.query("limit") ?? "100");
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) return c.json({ error: "after_seq must be a non-negative integer" }, 400);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return c.json({ error: "limit must be an integer 1-1000" }, 400);
+    const dest = c.req.query("dest") || undefined;
+    const messages = store.getSentMessages(agentId, afterSeq, dest, limit);
+    return c.json({ agent_id: agentId, after_seq: afterSeq, dest: dest ?? null, count: messages.length, messages });
+  });
+
   // --- SSE Stream ---
 
   app.get("/agents/:id/stream", async (c) => {

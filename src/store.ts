@@ -1173,6 +1173,17 @@ export class Store {
     ).all(sinceTsMs, agentId, limit) as Message[];
   }
 
+  /**
+   * Messages this agent SENT after a seq, oldest first, optionally to one dest. Metadata only (no payload):
+   * the one consumer (bk-ingress) asks "did the persona answer this asker over Wire since seq N?".
+   */
+  getSentMessages(source: string, afterSeq: number, dest?: string, limit = 100): Array<Pick<Message, "seq" | "dest" | "topic" | "created_at">> {
+    const sql = "SELECT seq, dest, topic, created_at FROM messages WHERE source = ? AND seq > ?"
+      + (dest ? " AND dest = ?" : "") + " ORDER BY seq ASC LIMIT ?";
+    const args: Array<string | number> = dest ? [source, afterSeq, dest, limit] : [source, afterSeq, limit];
+    return this.db.prepare(sql).all(...args) as Array<Pick<Message, "seq" | "dest" | "topic" | "created_at">>;
+  }
+
   // --- Delivery log ---
 
   logDelivery(messageSeq: number, agentId: string, result: string, error?: string): void {
