@@ -1019,3 +1019,59 @@ describe("inbound webhook — Linear deliveries are slimmed; filters still see t
     expect(env.payload.data.identifier).toBe("ENG-9");
   });
 });
+
+describe("GET /agents/:id/sent — an agent's OWN outbox after a seq, metadata only", () => {
+  const send = (source: string, dest: string, text: string) =>
+    store.writeMessage({ source, dest, topic: "webhook.ipc", payload: JSON.stringify({ text }) });
+
+  test("lists only the caller's messages after after_seq, filtered by dest, without payloads", async () => {
+    const key = await agentWithKey("vacherin");
+    const before = send("vacherin", "baguette", "old");
+    const asker = send("baguette", "vacherin", "question");
+    const reply = send("vacherin", "baguette", "secret-ruling-text");
+    send("vacherin", "fondant", "other dest");
+    send("brioche", "baguette", "not vacherin");
+
+    const res = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=${asker.seq}&dest=baguette`, {
+      headers: { authorization: `Bearer ${await agentJwt("vacherin", key, "")}` },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain("secret-ruling-text");
+    const json = JSON.parse(body) as { count: number; messages: Array<{ seq: number; dest: string }> };
+    expect(json.messages.map((m) => m.seq)).toEqual([reply.seq]);
+    expect(json.messages.some((m) => m.seq === before.seq)).toBe(false);
+
+    const all = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=${asker.seq}`, {
+      headers: { authorization: `Bearer ${await agentJwt("vacherin", key, "")}` },
+    });
+    expect(((await all.json()) as { count: number }).count).toBe(2);
+  });
+
+  test("an agent may NOT read another agent's outbox", async () => {
+    const key = await agentWithKey("papassinos");
+    await agentWithKey("vacherin");
+    send("vacherin", "baguette", "x");
+    const res = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=0`, {
+      headers: { authorization: `Bearer ${await agentJwt("papassinos", key, "")}` },
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toContain("JWT issuer does not match agent");
+  });
+
+  test("no JWT is refused; a bad after_seq is a 400; the operator may read any outbox", async () => {
+    await agentWithKey("vacherin");
+    const m = send("vacherin", "baguette", "x");
+    const anon = await fetch(`${baseUrl}/agents/vacherin/sent`);
+    expect(anon.status).toBe(401);
+    expect(((await anon.json()) as { error: string }).error).toContain("Bearer");
+    const bad = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=-1&token=${TOKEN}`);
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("after_seq");
+    const op = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=0&token=${TOKEN}`);
+    expect(op.status).toBe(200);
+    expect(((await op.json()) as { messages: Array<{ seq: number }> }).messages.map((x) => x.seq)).toEqual([m.seq]);
+    const missing = await fetch(`${baseUrl}/agents/nobody/sent?token=${TOKEN}`);
+    expect(missing.status).toBe(404);
+  });
+});
