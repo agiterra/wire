@@ -6,6 +6,8 @@
 // Persona rows get Restart / Run-as / credential status (2026-09-02). Same markup on the server
 // render and the SSE re-render; the JS binds by data-* attributes.
 const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
+import { AGENT_CELL_HELPERS, agentNameCell, relTime, tapFull } from "./dashboard-agent-cells.js";
+
 function personaControls(id: string): string {
   const opts = PERSONA_PRESETS.map(([h, m, label]) => `<option value="${h} ${m}">${label}</option>`).join("");
   return `<span class="persona-status" data-pstatus="${id}" title="harness · credential">…</span>` +
@@ -23,13 +25,13 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       : '<span class="badge badge-ephemeral">ephemeral</span>';
     const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + "…" : "—";
     return `
-      <tr class="agent-row">
+      <tr class="agent-row" data-agent="${esc(a.id)}">
         <td><span style="color:${statusColor}">${status}</span></td>
-        <td class="agent-name copyable" onclick="copy('${esc(a.id)}',this)" title="Click to copy id">${esc(a.display_name)}</td>
+        <td class="agent-name">${agentNameCell(a, {})}</td>
         <td class="badge-cell">${typeBadge}</td>
-        <td class="dim copyable" onclick="copy('${esc(a.pubkey)}',this)" title="Click to copy full key">${pubkeyShort}</td>
+        <td class="dim">${tapFull("key:" + a.id, pubkeyShort, a.pubkey || "—", {})}</td>
         <td class="dim">${a.sessions}</td>
-        <td class="dim">${lastSeen}</td>
+        <td class="dim">${tapFull("seen:" + a.id, relTime(a.last_seen_at, Date.now()), lastSeen, {})}</td>
         <td class="agent-actions">
           <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
           <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
@@ -96,23 +98,33 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .agent-row { cursor: pointer; }
     .agent-row:hover { background: #111; }
-    .agent-name { color: #60a5fa; font-weight: 500; white-space: nowrap; }
+    .agent-name { white-space: normal; overflow-wrap: anywhere; }
+    .agent-label { color: #60a5fa; font-weight: 500; cursor: pointer; }
+    .chips { margin-left: 6px; }
+    .chip { display: inline-block; font-size: 0.75em; padding: 0 5px; margin: 0 4px 2px 0; border-radius: 3px; background: #1f2937; color: #cbd5e1; text-decoration: none; white-space: nowrap; }
+    a.chip:hover { background: #374151; color: #fff; }
+    .agent-detail { margin: 4px 0 2px; padding: 4px 8px; border-left: 2px solid #1e3a5f; color: #a1a1aa; font-size: 0.9em; }
+    .tapfull { cursor: pointer; }
+    .tapfull.open { white-space: normal; overflow-wrap: anywhere; color: #e5e5e5; }
+    td:has(.tapfull.open) { white-space: normal; }
     .badge { font-size: 0.7em; padding: 1px 5px; border-radius: 3px; font-weight: 400; vertical-align: middle; }
     .badge-personai { background: #1e3a5f; color: #60a5fa; }
     .badge-ephemeral { background: #3f3f00; color: #facc15; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     col.col-status { width: 24px; }
-    col.col-name { width: 130px; }
+    col.col-name { }
     col.col-type { width: 80px; }
     col.col-key { width: 100px; }
     col.col-sessions { width: 70px; }
-    col.col-seen { }
+    col.col-seen { width: 90px; }
     col.col-actions { width: 220px; }
     .badge-cell { white-space: nowrap; }
     td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
     .agent-plan {
       padding: 2px 0 8px 28px;
+      white-space: normal;
+      overflow-wrap: anywhere;
       color: #a1a1aa;
       line-height: 1.5;
     }
@@ -643,8 +655,23 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     // --- Live SSE updates ---
     const evtSource = new EventSource('/dashboard/stream');
     evtSource.addEventListener('refresh', () => window.location.reload());
+    // Tap-open state for registry cells (name details, full key, exact Seen time). Kept here so
+    // the 3s SSE re-render does not close what the viewer opened.
+    const openCells = {};
+    document.querySelector('tbody').addEventListener('click', (e) => {
+      const t = e.target.closest('[data-toggle]');
+      if (!t) return;
+      e.stopPropagation();
+      const k = t.dataset.toggle;
+      if (openCells[k]) delete openCells[k]; else openCells[k] = true;
+      if (lastAgents) renderAgents(lastAgents);
+    });
+    let lastAgents = null;
     evtSource.onmessage = (e) => {
-      const agents = JSON.parse(e.data);
+      lastAgents = JSON.parse(e.data);
+      renderAgents(lastAgents);
+    };
+    function renderAgents(agents) {
 
       // Update stats
       document.querySelector('.stats').innerHTML = [
@@ -665,11 +692,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + '…' : '—';
         return '<tr class="agent-row" data-agent="' + esc(a.id) + '">' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy id">' + esc(a.display_name) + '</td>' +
+          '<td class="agent-name">' + agentNameCell(a, openCells) + '</td>' +
           '<td class="badge-cell">' + typeBadge + '</td>' +
-          '<td class="dim copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full key">' + pubkeyShort + '</td>' +
+          '<td class="dim">' + tapFull('key:' + a.id, pubkeyShort, a.pubkey || '—', openCells) + '</td>' +
           '<td class="dim">' + a.sessions + '</td>' +
-          '<td class="dim">' + lastSeen + '</td>' +
+          '<td class="dim">' + tapFull('seen:' + a.id, relTime(a.last_seen_at, Date.now()), lastSeen, openCells) + '</td>' +
           '<td class="agent-actions">' +
             '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
             '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
@@ -691,7 +718,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         el.onclick = (e) => { e.stopPropagation(); promptSend(el.dataset.msg); };
       });
       bindPersonaControls(tbody);
-    };
+    }
 
     // --- Message log ---
     let msgCount = 0;
@@ -792,6 +819,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       // Iterate oldest-first so each prepend pushes older entries down
       for (const msg of messages) addMessageEntry(msg);
     }).catch(() => {});
+
+    ${AGENT_CELL_HELPERS}
 
     function esc(s) {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
