@@ -112,12 +112,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .badge-ephemeral { background: #3f3f00; color: #facc15; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     col.col-status { width: 24px; }
-    col.col-name { }
+    col.col-name { width: 300px; }
     col.col-type { width: 80px; }
     col.col-key { width: 100px; }
     col.col-sessions { width: 70px; }
     col.col-seen { width: 90px; }
-    col.col-actions { width: 220px; }
+    col.col-actions { }
     .badge-cell { white-space: nowrap; }
     td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
@@ -140,7 +140,9 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .agent-plan del { color: #6b7280; }
     .agent-plan ul, .agent-plan ol { margin: 2px 0 2px 20px; }
     .agent-plan li { margin: 1px 0; }
-    .agent-actions { white-space: nowrap; }
+    /* The actions column takes the spare width and WRAPS: the persona model/cred status must never be ellipsis-cropped (Tim 2026-10-22). */
+    td.agent-actions { white-space: normal; overflow: visible; text-overflow: clip; }
+    .agent-actions > * { margin: 2px 0; }
     .agent-actions button { padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; }
     .agent-actions button:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
     .agent-actions .row-btn { display: inline-block; padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; text-decoration: none; line-height: inherit; }
@@ -313,9 +315,23 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .usage-cell.unknown { border-color: #3f3f46; }
     .usage-cell.unknown .usage-label { color: #71717a; }
     .usage-stale { color: #f59e0b; font-size: 11px; margin-left: 6px; }
-    .persona-status { font-size: 11px; margin: 0 6px; color: #a1a1aa; }
+    .persona-status { font-size: 11px; margin: 0 6px; color: #a1a1aa; display: inline-block; white-space: normal; overflow-wrap: anywhere; }
     .persona-status .pst-ok { color: #4ade80; }
     .persona-status .pst-red { color: #f87171; font-weight: bold; }
+    /* Phone width: the 7-column table cannot fit, so each agent row becomes a wrapping line (name, type, seen,
+       then the actions) and Key/Sessions are dropped (the key stays reachable via peek/msg). Same nth-child order
+       on the server render and the SSE re-render. */
+    @media (max-width: 700px) {
+      table, tbody { display: block; width: 100%; }
+      colgroup, thead { display: none; }
+      tr.agent-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding-top: 6px; }
+      tr.agent-row > td { display: block; padding: 2px 0; border: 0; overflow: visible; white-space: normal; }
+      tr.agent-row > td:nth-child(2) { flex: 1 1 calc(100% - 32px); }
+      tr.agent-row > td:nth-child(4), tr.agent-row > td:nth-child(5) { display: none; }
+      tr.agent-row > td.agent-actions { flex: 1 1 100%; }
+      tr:not(.agent-row) { display: block; }
+      td.agent-plan { display: block; padding-left: 16px; }
+    }
     .agent-actions select { padding: 2px 4px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; font-family: inherit; }
     .stats {
       display: flex;
