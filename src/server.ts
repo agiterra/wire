@@ -42,7 +42,7 @@ import {
 import { verifyRegistrationResponse, verifyAuthenticationResponse } from "@simplewebauthn/server";
 import type { Logger } from "pino";
 import { evaluateFilter, evaluateExpression, validateFilter, checkFilter } from "./filter.js";
-import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
+import { renderDashboard as _initialRenderDashboard, renderLogin, PERSONA_IDS } from "./dashboard.js";
 import { peekAgentScreen, type PeekAgent, type PeekResult } from "./peek-screen.js";
 import { loadSecretProviders, refreshSecrets } from "./secret-providers.js";
 import {
@@ -2035,7 +2035,6 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   // com.agiterra.persona-restart (persona-restart-watcher.sh) validates the persona, checks the
   // credential for the target harness, and performs the restart; it writes <id>.result back.
   const PERSONA_SPOOL = process.env.WIRE_PERSONA_SPOOL ?? "/tmp/agiterra-persona-restart";
-  const PERSONA_IDS = new Set((process.env.WIRE_PERSONA_IDS ?? "fondant,brioche,herald,vacherin").split(",").map((s) => s.trim()).filter(Boolean));
   app.post("/agents/:id/persona-action", async (c) => {
     const err = requireOperator(c);
     if (err) return err;

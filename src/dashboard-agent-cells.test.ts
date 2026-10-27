@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_CELL_HELPERS, agentNameCell, agentTags, relTime, tapFull } from "./dashboard-agent-cells.js";
-import { renderDashboard } from "./dashboard.js";
+import { AGENT_CELL_HELPERS, agentNameCell, agentTags, machineCell, machineName, relTime, tapFull } from "./dashboard-agent-cells.js";
+import { PERSONA_IDS, renderDashboard } from "./dashboard.js";
 
 const NOW = Date.parse("2026-10-22T16:00:00Z");
 
@@ -56,13 +56,49 @@ describe("cells", () => {
   });
 });
 
+describe("machine", () => {
+  const here = { name: "patisserie", aliases: ["patisserie", "tims-mac-mini"] };
+  test("short name from the self-reported host; any alias of this box shows as its name", () => {
+    expect(machineName({ ssh_host: "patisserie.tail3ef8a5.ts.net" }, here)).toBe("patisserie");
+    expect(machineName({ ssh_host: "tims-mac-mini.local" }, here)).toBe("patisserie");
+    expect(machineName({ ssh_host: "localhost" }, here)).toBe("patisserie");
+    expect(machineName({ ssh_host: "bk-node-3.ec2.internal" }, here)).toBe("bk-node-3");
+    expect(machineName({ ssh_host: null }, here)).toBe("");
+  });
+  test("cell: full host on hover; no host says so, with no ellipsis", () => {
+    const c = machineCell({ id: "x", ssh_host: "bk-node-3.ec2.internal" }, here, {});
+    expect(c).toContain(">bk-node-3<");
+    expect(c).toContain('title="bk-node-3.ec2.internal"');
+    expect(machineCell({ id: "x" }, here, {})).toContain("none reported");
+  });
+});
+
+describe("page", () => {
+  const row = (id: string, permanent: number) => ({ id, display_name: id, permanent, online: true, sessions: 1, last_seen_at: "2026-10-22T15:56:00Z", pubkey: "abcdef0123456789", plan: "", ssh_host: "patisserie.tail3ef8a5.ts.net" });
+  test("persona controls only on persona ids, never on other permanent agents", () => {
+    expect(PERSONA_IDS.has("baguette")).toBe(true);
+    const html = renderDashboard([row("baguette", 1), row("gaia", 1), row("wallet-vault", 1)], "Tim");
+    expect(html).toContain('data-pstatus="baguette"');
+    expect(html).not.toContain('data-pstatus="gaia"');
+    expect(html).not.toContain('data-pstatus="wallet-vault"');
+  });
+  test("no ellipsis anywhere in the rendered page", () => {
+    const html = renderDashboard([row("fondant", 1), row("eng-1862-5167-soil", 0)], "Tim");
+    expect(html).not.toContain("…");
+    expect(html).not.toContain("text-overflow: ellipsis");
+    expect(html).toContain("<th>Machine</th>");
+  });
+});
+
 describe("client injection", () => {
   test("the injected helper source runs in a plain JS context and matches the server", () => {
-    const run = new Function(AGENT_CELL_HELPERS + "\nreturn { agentTags, relTime, agentNameCell };")();
+    const run = new Function(AGENT_CELL_HELPERS + "\nreturn { agentTags, relTime, agentNameCell, machineCell };")();
     const a = { id: "eng-1862-5167-soil", display_name: "eng-1862-5167-soil", plan: "PR #5" };
     expect(run.agentTags(a)).toEqual(agentTags(a));
     expect(run.relTime("2026-10-22T15:56:00Z", NOW)).toBe("4m ago");
     expect(run.agentNameCell(a, {})).toBe(agentNameCell(a, {}));
+    const h = { name: "p", aliases: ["p"] };
+    expect(run.machineCell({ id: "x", ssh_host: "q.lan" }, h, {})).toBe(machineCell({ id: "x", ssh_host: "q.lan" }, h, {}));
   });
   test("the rendered page's inline scripts parse", () => {
     const html = renderDashboard([{ id: "eng-1862-5167-soil", display_name: "eng-1862-5167-soil", permanent: 0, online: true, sessions: 1, last_seen_at: "2026-10-22T15:56:00Z", pubkey: "abcdef0123456789", plan: "x" }], "Tim");

@@ -6,13 +6,36 @@
 // Persona rows get Restart / Run-as / credential status (2026-09-02). Same markup on the server
 // render and the SSE re-render; the JS binds by data-* attributes.
 const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
-import { AGENT_CELL_HELPERS, agentNameCell, relTime, tapFull } from "./dashboard-agent-cells.js";
+import { AGENT_CELL_HELPERS, agentNameCell, machineCell, relTime, tapFull } from "./dashboard-agent-cells.js";
+import { hostname } from "os";
+import { execFileSync } from "child_process";
+
+// The persona ids: only these get Restart / Run-as / credential status. Every other permanent agent (gaia,
+// wallet-vault, crew-svc@patisserie) is not a persona, and a check on it is refused by the server, which showed as a red
+// "check refused" on every page load (Tim, 2026-10-27: no "check" errors). server.ts imports this one copy.
+export const PERSONA_IDS = new Set((process.env.WIRE_PERSONA_IDS ?? "fondant,brioche,baguette,herald,vacherin").split(",").map((s) => s.trim()).filter(Boolean));
+
+// This broker's machine, for the Machine column: its short hostname, and every other name this box answers to
+// (macOS LocalHostName, e.g. "tims-mac-mini" for patisserie) so that a stale self-report maps to the same name.
+function localMachine(): { name: string; aliases: string[] } {
+  const name = hostname().split(".")[0].toLowerCase();
+  const aliases = [name];
+  if (process.platform === "darwin") {
+    try {
+      aliases.push(execFileSync("/usr/sbin/scutil", ["--get", "LocalHostName"], { encoding: "utf8" }).trim().toLowerCase());
+    } catch (e) {
+      console.error("dashboard: scutil --get LocalHostName failed; Machine column maps only the hostname", e);
+    }
+  }
+  return { name, aliases };
+}
+const MACHINE_HERE = localMachine();
 
 function personaControls(id: string): string {
   const opts = PERSONA_PRESETS.map(([h, m, label]) => `<option value="${h} ${m}">${label}</option>`).join("");
-  return `<span class="persona-status" data-pstatus="${id}" title="harness · credential">…</span>` +
+  return `<span class="persona-status" data-pstatus="${id}" title="harness · credential">checking</span>` +
     `<button data-restart="${id}" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>` +
-    `<select data-runas="${id}" title="Switch harness/model and restart"><option value="">run as…</option>${opts}</select>`;
+    `<select data-runas="${id}" title="Switch harness/model and restart"><option value="">run as</option>${opts}</select>`;
 }
 
 export function renderDashboard(agents: any[], operatorName: string): string {
@@ -23,11 +46,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     const typeBadge = a.permanent
       ? '<span class="badge badge-personai">personai</span>'
       : '<span class="badge badge-ephemeral">ephemeral</span>';
-    const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + "…" : "—";
+    const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) : "—";
     return `
       <tr class="agent-row" data-agent="${esc(a.id)}">
         <td><span style="color:${statusColor}">${status}</span></td>
         <td class="agent-name">${agentNameCell(a, {})}</td>
+        <td class="dim">${machineCell(a, MACHINE_HERE, {})}</td>
         <td class="badge-cell">${typeBadge}</td>
         <td class="dim">${tapFull("key:" + a.id, pubkeyShort, a.pubkey || "—", {})}</td>
         <td class="dim">${a.sessions}</td>
@@ -36,10 +60,10 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
           <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
           <a class="row-btn" href="${esc(attachHref(a))}" title="Attach this agent's screen in a new iTerm2 tab">📺 attach</a>
-          ${a.permanent ? personaControls(a.id) : ""}
+          ${PERSONA_IDS.has(a.id) ? personaControls(a.id) : ""}
         </td>
       </tr>
-      <tr><td colspan="7" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
+      <tr><td colspan="8" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
   }).join("\n");
 
   return `<!DOCTYPE html>
@@ -113,13 +137,14 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     table { width: 100%; border-collapse: collapse; table-layout: auto; }
     col.col-status { width: 24px; }
     col.col-name { }
+    col.col-machine { width: 1%; }
     col.col-type { width: 80px; }
     col.col-key { width: 100px; }
     col.col-sessions { width: 70px; }
     col.col-seen { width: 90px; }
     col.col-actions { }
     .badge-cell { white-space: nowrap; }
-    td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    td, th { white-space: nowrap; }
     th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
     .agent-plan {
       padding: 2px 0 8px 28px;
@@ -232,7 +257,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       display: none;
     }
     #message-log:empty::after {
-      content: 'Waiting for messages…';
+      content: 'Waiting for messages';
       color: #3f3f46;
     }
     .msg-log-header {
@@ -269,7 +294,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .msg-delivery .uni { color: #4ade80; }
     .msg-delivery .broad { color: #4ade80; }
     .msg-delivery .fail { color: #f87171; }
-    .msg-snippet { color: #3f3f46; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-snippet { color: #3f3f46; font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
     .msg-detail {
       display: none;
       margin: 4px 0 4px 92px;
@@ -325,7 +350,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
        then the actions) and Key/Sessions are dropped (the key stays reachable via peek/msg). Same nth-child order
        on the server render and the SSE re-render. */
     @media (max-width: 1400px) {
-      thead th:nth-child(4), thead th:nth-child(5), tr.agent-row > td:nth-child(4), tr.agent-row > td:nth-child(5) { display: none; }
+      thead th:nth-child(5), thead th:nth-child(6), tr.agent-row > td:nth-child(5), tr.agent-row > td:nth-child(6) { display: none; }
     }
     @media (max-width: 1150px) {
       table, tbody { display: block; width: 100%; }
@@ -334,8 +359,15 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       tr.agent-row > td, tr.agent-row > td:not(.agent-name) { display: block; width: auto; padding: 2px 0; border: 0; overflow: visible; white-space: normal; }
       .persona-status { white-space: normal; }
       tr.agent-row > td:nth-child(2) { flex: 1 1 calc(100% - 32px); }
-      tr.agent-row > td:nth-child(4), tr.agent-row > td:nth-child(5) { display: none; }
+      tr.agent-row > td:nth-child(5), tr.agent-row > td:nth-child(6) { display: none; }
       tr.agent-row > td.agent-actions { flex: 1 1 100%; }
+      tr.agent-row > td { min-width: 0; max-width: 100%; }
+      td.agent-actions { white-space: normal; }
+      .agent-actions > * { margin-bottom: 4px; }
+      .chips { white-space: normal; }
+      body { padding: 16px; }
+      header { flex-wrap: wrap; gap: 4px; }
+      .form-row { flex-wrap: wrap; }
       tr:not(.agent-row) { display: block; }
       td.agent-plan { display: block; padding-left: 16px; }
     }
@@ -431,13 +463,14 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     <div><span class="stat-value">${agents.reduce((n: number, a: any) => n + a.sessions, 0)}</span> sessions</div>
   </div>
 
-  <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">tokens</div><div class="usage-vals">loading…</div></div></div>
+  <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">tokens</div><div class="usage-vals">loading</div></div></div>
 
   <h2>Agent Registry</h2>
   <table>
     <colgroup>
       <col class="col-status">
       <col class="col-name">
+      <col class="col-machine">
       <col class="col-type">
       <col class="col-key">
       <col class="col-sessions">
@@ -448,6 +481,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       <tr>
         <th></th>
         <th>Agent</th>
+        <th>Machine</th>
         <th>Type</th>
         <th>Key</th>
         <th>Sessions</th>
@@ -463,7 +497,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
   <div class="form-section">
     <h2>Wallets</h2>
-    <div id="wallets-panel" class="wallets-empty">Loading…</div>
+    <div id="wallets-panel" class="wallets-empty">Loading</div>
   </div>
 
   <div class="form-section">
@@ -498,18 +532,20 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
   <script>
     // --- Persona Restart / Run-as / credential status (POST /agents/:id/persona-action) ---
+    const PERSONA_IDS_JS = ${JSON.stringify([...PERSONA_IDS])};
+    const MACHINE_HERE = ${JSON.stringify(MACHINE_HERE)};
     const PERSONA_PRESETS_JS = [['claude-code','claude-fable-5-1','Claude Fable 5.1'],['grok','grok-4.6','Grok 4.6'],['codex','gpt-5.6-sol','Codex Sol']];
     function personaControlsJs(id) {
       const opts = PERSONA_PRESETS_JS.map(p => '<option value="' + p[0] + ' ' + p[1] + '">' + p[2] + '</option>').join('');
-      const st = personaStatusCache[id] || '…';
+      const st = personaStatusCache[id] || 'checking';
       return '<span class="persona-status" data-pstatus="' + esc(id) + '" title="harness · credential">' + st + '</span>' +
         '<button data-restart="' + esc(id) + '" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>' +
-        '<select data-runas="' + esc(id) + '" title="Switch harness/model and restart"><option value="">run as…</option>' + opts + '</select>';
+        '<select data-runas="' + esc(id) + '" title="Switch harness/model and restart"><option value="">run as</option>' + opts + '</select>';
     }
     const personaStatusCache = {};
     function renderPersonaStatus(id, r) {
       let html;
-      if (!r) html = '<span class="dim">pending…</span>';
+      if (!r) html = '<span class="dim">checking</span>';
       else if (r.action === 'check' && r.ok) {
         const live = r.cred && r.cred.live;
         html = '<span class="' + (live ? 'pst-ok' : 'pst-red') + '">' + esc(r.harness || '?') + ' ' + esc(r.model || '') + ' · cred ' + (live ? 'ok' : 'DEAD') + (r.cred && r.cred.expires_at ? ' (exp ' + esc(String(r.cred.expires_at).slice(11,16)) + 'Z)' : '') + '</span>';
@@ -583,13 +619,13 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       if (!cons.length) return flag || ('as of ' + esc(String(h.as_of || '').slice(11, 16)) + 'Z');
       const full = cons.map(c => gb(c.footprint_mb) + '  ' + c.name + ' x' + c.procs + ' (rss ' + gb(c.rss_mb) + ' + compressed ' + gb(c.cmprs_mb) + ')').join('\\n');
       const top = cons.slice(0, 3).map(c => esc(String(c.name).replace(/ \\(.*\\)$/, '')) + ' ' + gb(c.footprint_mb)).join(' · ');
-      return (flag ? flag + ' · ' : '') + '<span title="footprint = resident + compressed, highest first\\n' + esc(full) + '">' + top + (cons.length > 3 ? ' · …' : '') + '</span>';
+      return (flag ? flag + ' · ' : '') + '<span title="footprint = resident + compressed, highest first\\n' + esc(full) + '">' + top + (cons.length > 3 ? ' · +' + (cons.length - 3) + ' more' : '') + '</span>';
     }
     // Pool box: short address on screen, full address on the clipboard (Tim 2026-09-10). Empty/absent address → plain '—'.
     function devWalletSpan(addr) {
       const a = String(addr || '');
       if (!a) return '—';
-      return '<span class="copyable" data-copy="' + esc(a) + '" title="Click to copy full address ' + esc(a) + '">' + esc(a.slice(0, 10)) + '…</span>';
+      return '<span class="copyable" data-copy="' + esc(a) + '" title="Click to copy full address ' + esc(a) + '">' + esc(a) + '</span>';
     }
     async function loadUsage() {
       const el = document.getElementById('usage-strip');
@@ -701,10 +737,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const typeBadge = a.permanent
           ? '<span class="badge badge-personai">personai</span>'
           : '<span class="badge badge-ephemeral">ephemeral</span>';
-        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + '…' : '—';
+        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) : '—';
         return '<tr class="agent-row" data-agent="' + esc(a.id) + '">' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
           '<td class="agent-name">' + agentNameCell(a, openCells) + '</td>' +
+          '<td class="dim">' + machineCell(a, MACHINE_HERE, openCells) + '</td>' +
           '<td class="badge-cell">' + typeBadge + '</td>' +
           '<td class="dim">' + tapFull('key:' + a.id, pubkeyShort, a.pubkey || '—', openCells) + '</td>' +
           '<td class="dim">' + a.sessions + '</td>' +
@@ -713,10 +750,10 @@ export function renderDashboard(agents: any[], operatorName: string): string {
             '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
             '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
             '<a class="row-btn" href="' + esc(attachHref(a)) + '" title="Attach this agent\\'s screen in a new iTerm2 tab">📺 attach</a>' +
-            (a.permanent ? personaControlsJs(a.id) : '') +
+            (PERSONA_IDS_JS.indexOf(a.id) >= 0 ? personaControlsJs(a.id) : '') +
           '</td>' +
           '</tr>' +
-          '<tr><td colspan="7" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
+          '<tr><td colspan="8" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
       }).join('');
 
       // Bind handlers
@@ -764,7 +801,9 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const snippet = typeof parsed === 'string'
         ? parsed
         : JSON.stringify(parsed);
-      const shortSnippet = snippet.length > 80 ? snippet.slice(0, 80) + '\u2026' : snippet;
+      // Collapsed view shows 80 chars and says how much more there is; a tap opens the full message (no ellipsis, Tim 2026-10-27).
+      const clip80 = (t) => t.length > 80 ? t.slice(0, 80) + ' [+' + (t.length - 80) + ' chars, tap to open]' : t;
+      const shortSnippet = clip80(snippet);
 
       const entry = document.createElement('div');
       entry.className = 'msg-entry';
@@ -783,7 +822,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           ?? parsed.message
           ?? (parsed.type === 'wrap-up' ? 'Wrap-Up for ' + (parsed.ticket || '?') : null);
         if (typeof readable === 'string' && readable) {
-          displaySnippet = readable.length > 80 ? readable.slice(0, 80) + '\u2026' : readable;
+          displaySnippet = clip80(readable);
         }
       }
 
@@ -940,7 +979,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           toggle.className = 'json-toggle' + (isOpen ? ' open' : '');
           const preview = document.createElement('span');
           preview.className = 'json-preview';
-          preview.textContent = '{' + keys.slice(0, 3).join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
+          preview.textContent = '{' + keys.slice(0, 3).join(', ') + (keys.length > 3 ? ', +' + (keys.length - 3) + ' more' : '') + '}';
           toggle.appendChild(preview);
           toggle.onclick = (e) => { e.stopPropagation(); toggle.classList.toggle('open'); };
           frag.appendChild(toggle);
@@ -1018,7 +1057,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       panel.innerHTML = addrs.map(addr => {
         const w = walletsCache[addr];
         const name = w.operator_name || w.name;
-        const shortAddr = addr.slice(0, 8) + '…' + addr.slice(-6);
+        const shortAddr = addr;
         const accessControls = w.access.mode === 'all'
           ? '<span class="wallet-access-disabled">all registered agents</span>'
           : (w.access.mode === 'creator-only'

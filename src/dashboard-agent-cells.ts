@@ -90,5 +90,26 @@ export function agentNameCell(a: any, open: Record<string, boolean>): string {
     (chips ? '<span class="chips">' + chips + "</span>" : "") + detail;
 }
 
+/**
+ * The machine an agent runs on, as a short name (Tim, 2026-10-27: "Can I please get the machine name in the
+ * dashboard?"). Source: the ssh_host the agent self-reports at registration (WIRE_SSH_HOST). Any name of the
+ * broker's own machine (`here.aliases`, e.g. its LocalHostName) shows as `here.name`, so one box never shows
+ * under two names. Empty string when the agent reported no host.
+ */
+export function machineName(a: any, here: { name: string; aliases: string[] }): string {
+  const host = String(a.ssh_host || "").trim().toLowerCase();
+  if (!host) return "";
+  if (host === "local" || host === "localhost") return here.name;
+  const label = host.split(".")[0];
+  return here.aliases.indexOf(label) >= 0 ? here.name : label;
+}
+
+/** The Machine cell: short name, the full self-reported host on hover AND tap. */
+export function machineCell(a: any, here: { name: string; aliases: string[] }, open: Record<string, boolean>): string {
+  const name = machineName(a, here);
+  if (!name) return '<span class="dim" title="This agent registered without a host (WIRE_SSH_HOST unset)">none reported</span>';
+  return tapFull("host:" + a.id, name, String(a.ssh_host), open);
+}
+
 /** Source of every helper above, for injection into the client <script>. */
-export const AGENT_CELL_HELPERS = [cellEsc, relTime, agentTags, tapFull, agentNameCell].map((f) => f.toString()).join("\n");
+export const AGENT_CELL_HELPERS = [cellEsc, relTime, agentTags, tapFull, agentNameCell, machineName, machineCell].map((f) => f.toString()).join("\n");
