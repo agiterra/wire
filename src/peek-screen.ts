@@ -19,7 +19,28 @@ export type PeekAgent = {
   id: string;
   run_as_uid?: string | null;
   screen_name?: string | null;
+  ssh_host?: string | null;
 };
+
+/**
+ * Beekeeper pod lanes register with ssh_host=bk-node-<n> and no uid or screen:
+ * beekeeper-acp drives the agent headless over ACP stdio, so there is no GNU
+ * screen to hardcopy or attach. Their live record is the session file inside
+ * the pod; /opt/agiterra/bin/lane-pod-view.sh (Fondant scripts/) finds the pod
+ * by its agiterra.org/lane annotation and renders that file. It runs as the uid
+ * holding the bk-node kubeconfigs.
+ */
+const POD_NODE = /^bk-node-[A-Za-z0-9-]+$/;
+export const POD_VIEW_BIN = "/opt/agiterra/bin/lane-pod-view.sh";
+export const POD_VIEW_UID = process.env.WIRE_POD_VIEW_UID || "fondant";
+
+export function isPodLane(agent: { run_as_uid?: string | null; ssh_host?: string | null }): boolean {
+  return !agent.run_as_uid && !!agent.ssh_host && POD_NODE.test(agent.ssh_host);
+}
+
+export function buildPodViewArgs(agentId: string, node: string): { file: string; args: string[] } {
+  return { file: "sudo", args: ["-n", "-u", POD_VIEW_UID, "-H", POD_VIEW_BIN, agentId, node] };
+}
 
 export type PeekOk = {
   ok: true;
@@ -109,12 +130,41 @@ export function peekAgentScreen(
     sleep?: (ms: number) => void;
   } = {},
 ): PeekResult {
+  const exec = deps.exec ?? ((file, args, opts) =>
+    execFileSync(file, args, { timeout: opts?.timeout ?? 5000, stdio: ["ignore", "pipe", "pipe"] }));
+
+  if (isPodLane(agent)) {
+    if (!isSafeToken(agent.id)) {
+      return { ok: false, status: 400, error: `unsafe agent id '${agent.id}'` };
+    }
+    const node = agent.ssh_host as string;
+    const { file, args } = buildPodViewArgs(agent.id, node);
+    let text: string;
+    try {
+      // kubectl exec into a Spot node: slower than a local hardcopy.
+      text = exec(file, args, { timeout: 25000 }).toString("utf8");
+    } catch (e) {
+      return {
+        ok: false,
+        status: 500,
+        error: `failed to read pod session for '${agent.id}' (node=${node})`,
+        detail: execErrorDetail(e),
+      };
+    }
+    if (text.length > MAX_OUTPUT) text = text.slice(-MAX_OUTPUT);
+    return {
+      ok: true,
+      agent_id: agent.id,
+      screen_name: `pod:${node}`,
+      run_as_uid: POD_VIEW_UID,
+      output: text.replace(/\s+$/, ""),
+    };
+  }
+
   const resolved = resolvePeekTarget(agent);
   if ("ok" in resolved) return resolved;
 
   const { uid, screenName } = resolved;
-  const exec = deps.exec ?? ((file, args, opts) =>
-    execFileSync(file, args, { timeout: opts?.timeout ?? 5000, stdio: ["ignore", "pipe", "pipe"] }));
   const homeForUid = deps.homeForUid ?? defaultHomeForUid;
   const readFile = deps.readFile ?? ((p) => readFileSync(p, "utf8"));
   const unlink = deps.unlink ?? ((p) => unlinkSync(p));

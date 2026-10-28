@@ -9,6 +9,10 @@ const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"]
 import { AGENT_CELL_HELPERS, agentNameCell, machineCell, relTime, tapFull } from "./dashboard-agent-cells.js";
 import { hostname } from "os";
 import { execFileSync } from "child_process";
+import { isPodLane, POD_VIEW_UID } from "./peek-screen.js";
+
+/** ssh host a cockpit uses to reach THIS Wire's machine for a pod-lane attach. */
+const POD_VIEW_HOST = process.env.WIRE_POD_VIEW_HOST || "patisserie.tail3ef8a5.ts.net";
 
 // The persona ids: only these get Restart / Run-as / credential status. Every other permanent agent (gaia,
 // wallet-vault, crew-svc@patisserie) is not a persona, and a check on it is refused by the server, which showed as a red
@@ -878,12 +882,14 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
 
     // Mirror of the server-side attachHref() — see dashboard.ts. Keep in sync.
+    const POD_VIEW = ${JSON.stringify({ host: POD_VIEW_HOST, uid: POD_VIEW_UID })};
     function attachHref(a) {
+      const pod = !a.run_as_uid && /^bk-node-[A-Za-z0-9-]+$/.test(a.ssh_host || '');
       return 'wire-attach://attach?' + new URLSearchParams({
         agent: a.id,
-        host: a.ssh_host || 'local',
-        user: a.run_as_uid || '',
-        screen: a.screen_name || a.id,
+        host: pod ? POD_VIEW.host : (a.ssh_host || 'local'),
+        user: pod ? POD_VIEW.uid : (a.run_as_uid || ''),
+        screen: pod ? 'pod:' + a.ssh_host : (a.screen_name || a.id),
       }).toString();
     }
 
@@ -1432,10 +1438,13 @@ function esc(s: string): string {
  * Keep the two in sync.
  */
 function attachHref(a: any): string {
+  // Pod lane: no screen on the node. Attach runs on this Wire's host as POD_VIEW_UID;
+  // wire-attach-session.sh sees screen=pod:<node> and follows the pod session.
+  const pod = isPodLane(a);
   return "wire-attach://attach?" + new URLSearchParams({
     agent: a.id,
-    host: a.ssh_host || "local",
-    user: a.run_as_uid || "",
-    screen: a.screen_name || a.id,
+    host: pod ? POD_VIEW_HOST : (a.ssh_host || "local"),
+    user: pod ? POD_VIEW_UID : (a.run_as_uid || ""),
+    screen: pod ? "pod:" + a.ssh_host : (a.screen_name || a.id),
   }).toString();
 }

@@ -1249,6 +1249,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       id: agent.id,
       run_as_uid: agent.run_as_uid,
       screen_name: agent.screen_name,
+      ssh_host: agent.ssh_host,
     });
     if (!result.ok) {
       return c.json({ error: result.error, detail: result.detail }, result.status as 400 | 404 | 500);
