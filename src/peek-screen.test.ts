@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildHardcopyArgs, isSafeToken, peekAgentScreen, resolvePeekTarget } from "./peek-screen";
+import { buildHardcopyArgs, buildPodViewArgs, isPodLane, isSafeToken, peekAgentScreen, resolvePeekTarget } from "./peek-screen";
 
 describe("peek token safety", () => {
   test("accepts persona and ephemeral names", () => {
@@ -118,5 +118,42 @@ describe("peekAgentScreen", () => {
       expect(result.status).toBe(500);
       expect(result.detail).toContain("No screen session found");
     }
+  });
+});
+
+describe("pod lanes (Beekeeper, headless ACP: no screen)", () => {
+  const lane = { id: "lane-rv-2267-5176-pr2129-r4", ssh_host: "bk-node-2", run_as_uid: null, screen_name: null };
+
+  test("isPodLane: bk-node host with no uid", () => {
+    expect(isPodLane(lane)).toBe(true);
+    expect(isPodLane({ ssh_host: "patisserie.tail3ef8a5.ts.net", run_as_uid: "_ephemeral" })).toBe(false);
+    expect(isPodLane({ ssh_host: "bk-node-2", run_as_uid: "fondant" })).toBe(false);
+    expect(isPodLane({ ssh_host: "bk-node-2;rm" })).toBe(false);
+    expect(isPodLane({ ssh_host: null })).toBe(false);
+  });
+
+  test("peek runs lane-pod-view.sh as the kubeconfig uid, never screen hardcopy", () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const r = peekAgentScreen(lane, {
+      exec: (file, args) => { calls.push({ file, args }); return Buffer.from("◆ working\n\n"); },
+    });
+    expect(calls).toEqual([buildPodViewArgs(lane.id, "bk-node-2")]);
+    expect(calls[0].args).toEqual(["-n", "-u", "fondant", "-H", "/opt/agiterra/bin/lane-pod-view.sh", lane.id, "bk-node-2"]);
+    expect(r).toEqual({ ok: true, agent_id: lane.id, screen_name: "pod:bk-node-2", run_as_uid: "fondant", output: "◆ working" });
+  });
+
+  test("pod viewer failure surfaces its stderr", () => {
+    const r = peekAgentScreen(lane, {
+      exec: () => { throw Object.assign(new Error("exit 1"), { stderr: Buffer.from("pod is Completed") }); },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toContain("pod is Completed");
+  });
+
+  test("unsafe pod lane id is refused before exec", () => {
+    let ran = false;
+    const r = peekAgentScreen({ ...lane, id: "lane-x;rm" }, { exec: () => { ran = true; return Buffer.from(""); } });
+    expect(ran).toBe(false);
+    expect(r.ok).toBe(false);
   });
 });

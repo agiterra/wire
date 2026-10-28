@@ -210,7 +210,7 @@ describe("GET /agents/:id/peek — Wire self-report, not crews.db", () => {
     expect(body.output).toBe("SCREEN DUMP");
     expect(body.run_as_uid).toBe("fondant");
     expect(body.screen_name).toBe("fondant");
-    expect(seen).toEqual([{ id: "peekme", run_as_uid: "fondant", screen_name: "fondant" }]);
+    expect(seen).toEqual([{ id: "peekme", run_as_uid: "fondant", screen_name: "fondant", ssh_host: null }]);
   });
 });
 
