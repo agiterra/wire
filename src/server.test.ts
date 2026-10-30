@@ -649,6 +649,61 @@ describe("Change A — JWT webhook ingress persists the VERIFIED sender pubkey",
   });
 });
 
+describe("Unknown unicast dest — 404, never a silent 200 (Baguette 813366)", () => {
+  function b64url(buf: ArrayBuffer | Uint8Array): string {
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function signedSend(dest: string) {
+    const kp = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair;
+    const rawPub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+    store.upsertAgent({ id: "baguette", display_name: "baguette", pubkey: btoa(String.fromCharCode(...rawPub)), permanent: true });
+    const body = JSON.stringify({ text: "order" });
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+    const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const header = b64url(new TextEncoder().encode(JSON.stringify({ alg: "EdDSA", typ: "JWT" })));
+    const payload = b64url(new TextEncoder().encode(JSON.stringify({ iss: "baguette", iat: Math.floor(Date.now() / 1000), body_hash: bodyHash })));
+    const sig = await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(`${header}.${payload}`));
+    return fetch(`${baseUrl}/webhooks/${encodeURIComponent(dest)}/ipc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${header}.${payload}.${b64url(sig)}` },
+      body,
+    });
+  }
+  const storedFor = (dest: string) => store.getMessages(0).filter((m) => m.dest === dest);
+
+  test("bare pod lane name -> 404 naming lane-<name> and bk.post; nothing stored", async () => {
+    store.upsertAgent({ id: "lane-eng-1-x", display_name: "lane-eng-1-x", pubkey: "pk-lane", permanent: false });
+    const res = await signedSend("eng-1-x");
+    expect(res.status).toBe(404);
+    const j = await res.json() as { error: string; detail: string };
+    expect(j.error).toBe("unknown dest");
+    expect(j.detail).toContain("'lane-eng-1-x'");
+    expect(j.detail).toContain("bk.post");
+    expect(storedFor("eng-1-x").length).toBe(0);
+  });
+
+  test("id nobody has -> 404 without the lane hint", async () => {
+    const res = await signedSend("nobody-here");
+    expect(res.status).toBe(404);
+    const j = await res.json() as { detail: string };
+    expect(j.detail).not.toContain("bk.post");
+  });
+
+  test("registered dest still -> 200 and stored", async () => {
+    const res = await signedSend("fondant");
+    expect(res.status).toBe(200);
+    expect(storedFor("fondant").length).toBe(1);
+  });
+
+  test("name@machine dest stays federated -> 200", async () => {
+    const res = await signedSend("crew-svc@chariot");
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("Change A — allowedPeers opt-in: a listed peer's forwards DO reach the plugin", () => {
   test("forwarded message to a plugin whose allowedPeers includes the peer routes normally", async () => {
     const { loadOrCreateServerIdentity } = await import("./identity");
