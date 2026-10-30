@@ -1535,6 +1535,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   // --- Inbound Webhook ---
 
+  /** UNKNOWN UNICAST DEST (2026-10-30, Baguette 813366, Brioche GO 813383). A JWT unicast to an id with no agent row
+   *  used to return 200 with delivered_to [] and the message was never read: 27 orders in 7 days went to bare pod
+   *  lane names (eng-2492-...) whose Wire id is lane-<name>, and github-review-broker answered rv-2486's reply_to
+   *  'rv-2486-...' into the void. So refuse it, unless a server plugin or a peer Wire claims the id (federation: the
+   *  router forwards offline unicast to a claiming peer; probes time out at 3 s). name@machine ids belong to their
+   *  machine and stay federated. Returns the 404 body, or null when the dest is deliverable. */
+  async function unknownUnicastDest(dest: string): Promise<Record<string, string> | null> {
+    if (dest.includes("@") || store.getAgent(dest) || serverPluginByAgentId.has(dest)) return null;
+    const { findPeerForAgent } = await import("./federation.js");
+    if (await findPeerForAgent(store, dest, log)) return null;
+    const lane = `lane-${dest}`;
+    const hint = store.getAgent(lane)
+      ? `'${lane}' is a pod lane's Wire id. Send lane orders with bk.post; an RPC reply_to for that lane is '${lane}'.`
+      : "Check the id: no agent on this broker or any peer has it.";
+    return { error: "unknown dest", detail: `no agent '${dest}' is registered; the message was not stored. ${hint}` };
+  }
+
   /** Shared webhook delivery logic. */
   async function handleWebhook(
     c: Context,
@@ -1636,6 +1653,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
         sourcePubkey = pubkey;
       } catch (e) {
         return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
+      }
+      const unknown = await unknownUnicastDest(agentId);
+      if (unknown) {
+        log.warn({ event: "unicast_unknown_dest", dest: agentId, source, plugin }, "refused unicast to unregistered dest");
+        return c.json(unknown, 404);
       }
     }
 
