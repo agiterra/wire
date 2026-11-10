@@ -2052,6 +2052,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     }
   });
 
+  // --- Agent session cards (Tim 2026-11-10 15:24Z, Fabrica DM). The gateway runs as tim and cannot read other uids'
+  // session logs, so fondant's host watch agent-sessions-collect writes the numbers (no transcript text) and this route
+  // only serves the file. Missing/unreadable -> ok:false with the reason, never an empty "all quiet" list.
+  app.get("/sessions", (c) => {
+    if (!isOperator(c)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const file = process.env.WIRE_SESSIONS_FILE ?? "/opt/agiterra/watch/state/agent-sessions.json";
+    try {
+      const data = JSON.parse(readFileSync(file, "utf8"));
+      return c.json({ ok: true, file, file_mtime: new Date(statSync(file).mtimeMs).toISOString(), data });
+    } catch (e: any) {
+      log.warn({ event: "sessions_read_fail", file, err: String(e?.message ?? e) }, "sessions file unreadable");
+      return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
+    }
+  });
+
   // --- Persona restart / run-as / credential check (2026-09-02, Tim: "restart button and
   // choose harness/model dropdowns ... warning flags when we're out of tokens"). The gateway runs
   // as tim with no sudo, so it only WRITES a request file; the root LaunchDaemon
