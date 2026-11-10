@@ -86,7 +86,7 @@ describe("page", () => {
     const html = renderDashboard([row("fondant", 1), row("eng-1862-5167-soil", 0)], "Tim");
     expect(html).not.toContain("…");
     expect(html).not.toContain("text-overflow: ellipsis");
-    expect(html).toContain("<th>Machine</th>");
+    expect(html).toContain('<div class="sc-k">Machine</div>');
   });
 });
 

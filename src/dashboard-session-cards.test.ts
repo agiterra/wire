@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SESSION_CARD_HELPERS, scDur, scTok, sessionCard, sessionSection, usageBurnRow } from "./dashboard-session-cards.js";
+import { AGENT_CELL_HELPERS } from "./dashboard-agent-cells.js";
+import { SESSION_CARD_HELPERS, agentCard, agentCards, cardAttachHref, scDur, scTok, sessionFoot, sessionHead, usageBurnRow } from "./dashboard-session-cards.js";
 import { renderDashboard } from "./dashboard.js";
+import { isPodLane } from "./peek-screen.js";
 
 const NOW = Date.parse("2026-11-10T16:00:00Z");
 
@@ -12,6 +14,20 @@ const card = (over: any = {}) => ({
   context: { tokens: 171000, window: 475000, window_source: "session log", warn: 190000, warn_source: "40% of window", level: "warn" },
   ...over,
 });
+
+const CTX = {
+  here: { name: "patisserie", aliases: ["patisserie", "tims-mac-mini"] }, personaIds: ["fondant", "brioche", "herald"],
+  presets: [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"]], podView: { host: "patisserie.ts.net", uid: "fondant" }, pstatus: {},
+};
+/** A Wire registry row, as GET / and the SSE stream send it. */
+const wire = (over: any = {}) => ({
+  id: "eng-4129-5774-ghcr3-a-very-long-lane-name-that-must-not-be-cropped", display_name: "eng-4129-5774-ghcr3-a-very-long-lane-name-that-must-not-be-cropped",
+  kind: "agent", permanent: 0, online: true, sessions: 1, last_seen_at: "2026-11-10T15:56:00Z", reaped_at: null,
+  pubkey: "abcdef0123456789", plan: "", ssh_host: "patisserie.tail3ef8a5.ts.net", run_as_uid: "_ephemeral", screen_name: "wire-eng-4129",
+  ...over,
+});
+/** The card for collector record `rec` joined to a Wire row with the same id. */
+const sessionCard = (rec: any, now: number) => agentCard(wire({ id: rec.id, display_name: rec.name }), rec, now, CTX, {});
 
 describe("formatters", () => {
   test("tokens", () => {
@@ -81,36 +97,135 @@ describe("usageBurnRow", () => {
   });
 });
 
-describe("sessionSection", () => {
-  test("not ok -> says why, never an empty list", () => {
-    expect(sessionSection({ ok: false, error: "ENOENT x" }, NOW)).toContain("session cards unavailable: ENOENT x");
+describe("agentCard: the Wire row's identity fields and buttons", () => {
+  test("machine, type, key, sessions, seen, plan and every row button", () => {
+    const h = agentCard(wire({ plan: "doing **ENG-5774**" }), null, NOW, CTX, {});
+    expect(h).toContain(">patisserie<"); // machine short name, full host on hover
+    expect(h).toContain('title="patisserie.tail3ef8a5.ts.net"');
+    expect(h).toContain("badge-ephemeral");
+    expect(h).toContain(">abcdef01<");
+    expect(h).toContain('title="abcdef0123456789"');
+    expect(h).toContain(">4m ago<");
+    expect(h).toContain('data-peek="eng-4129-5774-ghcr3-a-very-long-lane-name-that-must-not-be-cropped"');
+    expect(h).toContain('data-msg="eng-4129');
+    expect(h).toContain('href="wire-attach://attach?');
+    expect(h).toContain('data-plan-for="eng-4129');
+    expect(h).toContain("doing **ENG-5774**"); // server render: escaped text, the client turns it into markdown
+    expect(h).toContain("lane #4129");
+    expect(h).not.toContain("data-pstatus"); // not a persona
+    expect(h).not.toContain("onclick");
   });
-  test("personas first, counts, finished list, stale marker", () => {
-    const h = sessionSection({ ok: true, data: {
+  test("full name, never cropped; tap opens the detail with the full id and key", () => {
+    const w = wire();
+    expect(agentCard(w, null, NOW, CTX, {})).toContain(">eng-4129-5774-ghcr3-a-very-long-lane-name-that-must-not-be-cropped</span>");
+    const open = agentCard(w, null, NOW, CTX, { ["detail:" + w.id]: true, ["key:" + w.id]: true });
+    expect(open).toContain('data-copy="abcdef0123456789"');
+    expect(open).toContain(">abcdef0123456789</span>");
+  });
+  test("persona: credential status, restart and run-as, status taken from ctx.pstatus", () => {
+    const h = agentCard(wire({ id: "herald", display_name: "herald", permanent: 1 }), null, NOW,
+      { ...CTX, pstatus: { herald: '<span class="pst-ok">claude-code x · cred ok</span>' } }, {});
+    expect(h).toContain("badge-personai");
+    expect(h).toContain('data-restart="herald"');
+    expect(h).toContain('data-runas="herald"');
+    expect(h).toContain('<option value="claude-code claude-fable-5-1">Claude Fable 5.1</option>');
+    expect(h).toContain("cred ok</span>");
+  });
+  test("no session record: still a card, session fields are dashes, pill says so", () => {
+    const h = agentCard(wire({ id: "vacherin", display_name: "vacherin", permanent: 1 }), null, NOW, CTX, {});
+    expect(h).toContain(">No session<");
+    expect(h).toContain('<div class="sc-k">Model</div><div class="sc-v">—</div>');
+    expect(h).toContain('<div class="sc-k">Running</div><div class="sc-v">—</div>');
+    expect(h).not.toContain(">0<");
+  });
+  test("integration and reaped badges; offline dot", () => {
+    const h = agentCard(wire({ id: "gaia", display_name: "Gaia", kind: "integration", permanent: 1, online: false, reaped_at: 1 }), null, NOW, CTX, {});
+    expect(h).toContain(">integration<");
+    expect(h).toContain(">reaped<");
+    expect(h).toContain("sc-reaped");
+    expect(h).toContain("sc-offline");
+    expect(h).toContain("○");
+  });
+  test("attach href matches peek-screen's pod rule", () => {
+    const pod = { id: "eng-1", ssh_host: "bk-node-7", run_as_uid: null };
+    expect(isPodLane(pod)).toBe(true);
+    expect(cardAttachHref(pod, CTX.podView)).toBe("wire-attach://attach?agent=eng-1&host=patisserie.ts.net&user=fondant&screen=pod%3Abk-node-7");
+    expect(cardAttachHref({ id: "fondant", ssh_host: "patisserie", run_as_uid: "fondant", screen_name: "fondant" }, CTX.podView))
+      .toBe("wire-attach://attach?agent=fondant&host=patisserie&user=fondant&screen=fondant");
+    expect(cardAttachHref({ id: "x" }, CTX.podView)).toBe("wire-attach://attach?agent=x&host=local&user=&screen=x");
+  });
+});
+
+describe("agentCards: the Wire set drives, sessions join by id", () => {
+  const sess = (agents: any[]) => ({ ok: true, data: { agents } });
+  test("every Wire row gets a card; session-only records are named, not dropped", () => {
+    const rows = [wire({ id: "vacherin", display_name: "vacherin", permanent: 1 }), wire({ id: "fondant", display_name: "Fondant", permanent: 1 }),
+      wire({ id: "wallet-vault", display_name: "wallet-vault", kind: "integration", permanent: 1 }), wire({ id: "eng-9-1-x", display_name: "eng-9-1-x" })];
+    const h = agentCards(rows, sess([card({ id: "fondant", name: "Fondant", runtime: "claude" }), card({ id: "ghost-lane", name: "ghost-lane" })]), NOW, CTX, {});
+    expect((h.match(/class="sc-card /g) || []).length).toBe(4);
+    expect(h).toContain(">CLAUDE<"); // fondant joined to its session
+    expect(h).toContain("Session records with no Wire registration: ghost-lane");
+    // personas (by id), then lanes, then integrations
+    expect(h.indexOf('data-sc-id="fondant"')).toBeLessThan(h.indexOf('data-sc-id="vacherin"'));
+    expect(h.indexOf('data-sc-id="vacherin"')).toBeLessThan(h.indexOf('data-sc-id="eng-9-1-x"'));
+    expect(h.indexOf('data-sc-id="eng-9-1-x"')).toBeLessThan(h.indexOf('data-sc-id="wallet-vault"'));
+  });
+  test("sessions unavailable -> cards still render from the Wire rows", () => {
+    const h = agentCards([wire({ id: "herald", display_name: "herald", permanent: 1 })], { ok: false, error: "ENOENT" }, NOW, CTX, {});
+    expect(h).toContain('data-sc-id="herald"');
+    expect(h).toContain(">No session<");
+  });
+});
+
+describe("sessionHead / sessionFoot", () => {
+  test("not ok -> says why, never an empty list", () => {
+    expect(sessionHead({ ok: false, error: "ENOENT x" }, NOW)).toContain("session data unavailable: ENOENT x");
+    expect(sessionFoot({ ok: false })).toBe("");
+  });
+  test("counts, burn strip, finished list, stale marker", () => {
+    const d = { ok: true, data: {
       as_of: "2026-11-10T15:50:00Z", counts: { running: 2, claude: 1, codex: 1 },
       agents: [card(), card({ id: "brioche", name: "brioche", kind: "persona", runtime: "claude" })],
       usage: { meters: [{ meter: "codex", used_pct: 77 }] },
       finished_24h: [{ id: "rv-1", name: "rv-1", runtime: "grok", stopped_at: "2026-11-10T15:00:00Z" }],
-      not_yet: "pods: phase 2" } }, NOW);
-    expect(h.indexOf("brioche")).toBeLessThan(h.indexOf("eng-4129"));
+      not_yet: "pods: phase 2" } };
+    const h = sessionHead(d, NOW);
     expect(h).toContain("2 running</b> · claude 1 · codex 1");
-    expect(h).toContain("Finished in last 24h (1 stopped)");
     expect(h).toContain("stale 10m");
-    expect(h).toContain("Not yet: pods: phase 2");
+    expect(h).toContain('class="sb-row');
+    const f = sessionFoot(d);
+    expect(f).toContain("Finished in last 24h (1 stopped)");
+    expect(f).toContain("Not yet: pods: phase 2");
   });
 });
 
 describe("client injection", () => {
-  test("the injected helper source runs standalone in a browser-like scope", () => {
-    const fn = new Function(SESSION_CARD_HELPERS + "\nreturn sessionSection;")();
-    const h = fn({ ok: true, data: { agents: [card()], counts: { running: 1 } } }, NOW);
+  test("the injected helper source runs standalone in a browser-like scope and matches the server", () => {
+    const fn = new Function(AGENT_CELL_HELPERS + "\n" + SESSION_CARD_HELPERS + "\nreturn agentCards;")();
+    const rows = [wire({ id: "herald", display_name: "herald", permanent: 1 }), wire()];
+    const d = { ok: true, data: { agents: [card()] } };
+    const h = fn(rows, d, NOW, CTX, {});
     expect(h).toContain(">Working<");
+    expect(h).toBe(agentCards(rows, d, NOW, CTX, {}));
   });
-  test("dashboard has the section, the poller and the CSS", () => {
-    const html = renderDashboard([], "Tim");
-    expect(html).toContain('<div id="session-cards">');
+  test("dashboard: cards are the only agent list, no registry table", () => {
+    const html = renderDashboard([wire({ id: "vacherin", display_name: "vacherin", permanent: 1 })], "Tim");
+    expect(html).toContain('<div id="agent-cards" class="sc-cards">');
+    expect(html).toContain('data-sc-id="vacherin"');
+    expect(html).not.toContain("Agent Registry");
+    expect(html).not.toContain("<tbody>");
+    expect(html).not.toContain('class="agent-row"');
     expect(html).toContain("fetch('/sessions')");
     expect(html).toContain(".sc-card {");
-    expect(html).toContain("function sessionSection(");
+    expect(html).toContain("function agentCards(");
+  });
+  test("top strip: no Claude / Codex / Grok / as-of cells, Host and Pool stay", () => {
+    const html = renderDashboard([], "Tim");
+    expect(html).not.toContain("usageCell('Claude");
+    expect(html).not.toContain("usageCell('Grok'");
+    expect(html).not.toContain("usageCell('Codex'");
+    expect(html).not.toContain('usage-label">as of<');
+    expect(html).toContain("usageCell('Host'");
+    expect(html).toContain("usageCell('Pool'");
   });
 });
