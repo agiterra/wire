@@ -36,13 +36,18 @@ describe("sessionCard", () => {
     expect(h).toContain("eng-4129-5774-ghcr3-a-very-long-lane-name-that-must-not-be-cropped</span>");
     expect(h).toContain(">CODEX<");
     expect(h).toContain(">Working<");
-    expect(h).toContain("1h 00m"); // running since launched_at
+    expect(h).toContain("1h 00m"); // no session start -> falls back to launched_at
     expect(h).toContain(">49<");
     expect(h).toContain("2.44M");
     expect(h).toContain("171.0K of 475.0K · line 190.0K · near line");
     expect(h).toContain("/opt/fabrica/fabrica-v3");
     expect(h).toContain('class="sc-fill warn" style="width:36.0%"');
     expect(h).toContain('class="sc-mark" style="left:40.0%"');
+  });
+  test("Running is the session, not the screen's launch", () => {
+    const h = sessionCard(card({ launched_at: "2026-09-14T00:00:00Z", session_started_at: "2026-11-10T15:30:00Z" }), NOW);
+    expect(h).toContain(">30m<");
+    expect(h).not.toContain(">57d");
   });
   test("unknown values show a dash and a hatched bar, never 0", () => {
     const h = sessionCard(card({ runtime: "grok", tokens_total: null, tokens_in: null, tool_calls: null, model: null, cwd: null,
