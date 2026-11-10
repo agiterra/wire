@@ -61,7 +61,8 @@ export function sessionCard(a: any, now: number): string {
     ? '<div class="sc-bar unknown"></div>'
     : '<div class="sc-bar"><div class="sc-fill ' + e(level) + '" style="width:' + pct.toFixed(1) + '%"></div>' +
       (warnPct !== null ? '<div class="sc-mark" style="left:' + warnPct.toFixed(1) + '%"></div>' : "") + "</div>";
-  const running = scAge(a.launched_at, now);
+  // Running = this SESSION (a persona's screen lives for weeks across /clear and recycles; that is not a session).
+  const running = scAge(a.session_started_at || a.launched_at, now);
   const field = (k: string, v: string, title?: string) =>
     '<div class="sc-f"><div class="sc-k">' + e(k) + '</div><div class="sc-v"' + (title ? ' title="' + e(title) + '"' : "") + ">" + e(v) + "</div></div>";
   return '<div class="sc-card sc-' + st + '" data-sc-id="' + e(a.id) + '">' +
@@ -70,7 +71,7 @@ export function sessionCard(a: any, now: number): string {
     '<span class="sc-kind">' + e(a.kind || "") + "</span>" +
     '<span class="sc-pill sc-pill-' + st + '"' + (a.error ? ' title="' + e(a.error) + '"' : "") + ">" + stLabel + "</span></div>" +
     '<div class="sc-grid">' +
-    field("Running", scDur(running), a.launched_at ? "launched " + a.launched_at : "") +
+    field("Running", scDur(running), (a.session_started_at ? "session since " + a.session_started_at + " · " : "") + (a.launched_at ? "screen launched " + a.launched_at : "")) +
     field("Last", a.last_event_age_s != null ? scDur(a.last_event_age_s) + " ago" : "—", (a.last_event_at || "") + (a.last_tool ? " · last tool " + a.last_tool : "")) +
     field("Calls", a.tool_calls != null ? String(a.tool_calls) : "—", a.tool_calls_10m != null ? a.tool_calls_10m + " in the last 10 min" : "") +
     field("Tokens", scTok(a.tokens_total), a.tokens_in != null ? "in " + a.tokens_in + " (cache incl.) · out " + (a.tokens_out ?? "—") + " · this session" : "no per-call usage in this runtime's log") +
