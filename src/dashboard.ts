@@ -7,6 +7,7 @@
 // render and the SSE re-render; the JS binds by data-* attributes.
 const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
 import { AGENT_CELL_HELPERS, agentNameCell, machineCell, relTime, tapFull } from "./dashboard-agent-cells.js";
+import { SESSION_CARD_CSS, SESSION_CARD_HELPERS } from "./dashboard-session-cards.js";
 import { hostname } from "os";
 import { execFileSync } from "child_process";
 import { isPodLane, POD_VIEW_UID } from "./peek-screen.js";
@@ -453,6 +454,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       color: #3f3f46;
       font-size: 11px;
     }
+    ${SESSION_CARD_CSS}
   </style>
 </head>
 <body>
@@ -468,6 +470,9 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   </div>
 
   <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">tokens</div><div class="usage-vals">loading</div></div></div>
+
+  <h2>Agent Sessions</h2>
+  <div id="session-cards"><div class="sc-empty">loading</div></div>
 
   <h2>Agent Registry</h2>
   <table>
@@ -703,6 +708,23 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     loadUsage();
     setInterval(loadUsage, 60000);
+
+    // --- Agent session cards (GET /sessions, polled every 30s; the file is fondant's agent-sessions watch) ---
+    ${SESSION_CARD_HELPERS}
+    async function loadSessions() {
+      const el = document.getElementById('session-cards');
+      try {
+        const res = await fetch('/sessions');
+        const j = await res.json();
+        const open = el.querySelector('details.sc-fin') && el.querySelector('details.sc-fin').open;
+        el.innerHTML = sessionSection(j, Date.now());
+        if (open) { const d = el.querySelector('details.sc-fin'); if (d) d.open = true; }
+      } catch (e) {
+        el.innerHTML = '<div class="sc-empty">/sessions failed: ' + esc(String(e)) + '</div>';
+      }
+    }
+    loadSessions();
+    setInterval(loadSessions, 30000);
 
     // --- Live SSE updates ---
     const evtSource = new EventSource('/dashboard/stream');
