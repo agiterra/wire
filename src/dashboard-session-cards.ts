@@ -265,5 +265,8 @@ export const SESSION_CARD_CSS = `
     .sc-fin summary { cursor: pointer; color: #a1a1aa; font-size: 12px; }
     .sc-fin-t { font-size: 11px; margin-top: 4px; } .sc-fin-t td { padding: 2px 8px 2px 0; vertical-align: top; overflow-wrap: anywhere; }
     .sc-note, .sc-empty { color: #6b7280; font-size: 11px; margin: 4px 0 12px 0; }
-    @media (max-width: 520px) { .sc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sb-row { grid-template-columns: 1fr; } }
+    /* machine names (patisserie) must not break mid-word: first identity column sizes to its content */
+    .sc-grid.sc-ident { grid-template-columns: max-content repeat(3, minmax(0, 1fr)); }
+    .sc-grid.sc-ident > :first-child .sc-v { overflow-wrap: normal; }
+    @media (max-width: 520px) { .sc-grid, .sc-grid.sc-ident { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sb-row { grid-template-columns: 1fr; } }
 `;
