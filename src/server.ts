@@ -2031,24 +2031,25 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       return c.json({ error: "unauthorized" }, 401);
     }
     const file = process.env.WIRE_USAGE_FILE ?? "/tmp/sweep-usage.json";
+    // host memory/swap/disk written every 60s by host-usage.sh (Tim 2026-09-01); absent => null. Read independently of
+    // the sweep file: since 2026-11-10 the dashboard strip shows only Host and Pool, so a missing sweep file must not blank them.
+    let host: unknown = null;
+    try { host = JSON.parse(readFileSync(process.env.WIRE_HOST_USAGE_FILE ?? "/tmp/host-usage.json", "utf8")); } catch { host = null; }
+    // shared testnet pool (dev-wallet USDC/ETH), written every 5 min by pool-usage.sh (2026-09-02)
+    let pool: unknown = null;
+    try { pool = JSON.parse(readFileSync(process.env.WIRE_POOL_USAGE_FILE ?? "/tmp/pool-usage.json", "utf8")); } catch { pool = null; }
+    // Claude account slots + per-slot usage, published by root's claude-account.sh (numbers only,
+    // never tokens); absent => null. Tim 2026-09-03: both accounts' stats, labeled; switch from here.
+    let accounts: unknown = null;
+    try { accounts = JSON.parse(readFileSync(process.env.WIRE_CLAUDE_ACCOUNTS_FILE ?? "/tmp/claude-accounts.json", "utf8")); } catch { accounts = null; }
     try {
       const raw = readFileSync(file, "utf8");
       const data = JSON.parse(raw);
       const mtime = statSync(file).mtimeMs;
-      // host memory/swap/disk written every 60s by host-usage.sh (Tim 2026-09-01); absent => null
-      let host: unknown = null;
-      try { host = JSON.parse(readFileSync(process.env.WIRE_HOST_USAGE_FILE ?? "/tmp/host-usage.json", "utf8")); } catch { host = null; }
-      // shared testnet pool (dev-wallet USDC/ETH), written every 5 min by pool-usage.sh (2026-09-02)
-      let pool: unknown = null;
-      try { pool = JSON.parse(readFileSync(process.env.WIRE_POOL_USAGE_FILE ?? "/tmp/pool-usage.json", "utf8")); } catch { pool = null; }
-      // Claude account slots + per-slot usage, published by root's claude-account.sh (numbers only,
-      // never tokens); absent => null. Tim 2026-09-03: both accounts' stats, labeled; switch from here.
-      let accounts: unknown = null;
-      try { accounts = JSON.parse(readFileSync(process.env.WIRE_CLAUDE_ACCOUNTS_FILE ?? "/tmp/claude-accounts.json", "utf8")); } catch { accounts = null; }
       return c.json({ accounts, ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host, pool });
     } catch (e: any) {
       log.warn({ event: "usage_read_fail", file, err: String(e?.message ?? e) }, "usage file unreadable");
-      return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
+      return c.json({ ok: false, file, error: String(e?.message ?? e), accounts, host, pool }, 200);
     }
   });
 
@@ -2183,6 +2184,18 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
           // belongs in other panels, not the agent-to-agent IPC log.
           const unsubRoute = router.onRoute((msg, deliveries) => {
             const t = msg.topic;
+            // Wallets panel live refresh (2026-11-10): the vault's directory rows (namespace wallet-vault only; the
+            // wallet-vault-<lane> test vaults are not shown) go to the dashboard as their own event. The route listener
+            // sees these regardless of dest, so the scoped PUT/DELETE events still reach the page.
+            if (t === "plugin_settings.updated" || t === "plugin_settings.deleted") {
+              let p: any = null;
+              try { p = JSON.parse(msg.payload); } catch (e: any) {
+                log.warn({ event: "dashboard_plugin_settings_parse_fail", seq: msg.seq, err: String(e?.message ?? e) }, "plugin_settings event payload is not JSON");
+                return;
+              }
+              if (p && p.namespace === "wallet-vault") write(`event: plugin_settings\ndata: ${JSON.stringify({ topic: t, payload: p })}\n\n`);
+              return;
+            }
             const isIpcFamily =
               t === "ipc" ||
               t.startsWith("ipc.") ||

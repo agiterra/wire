@@ -445,6 +445,37 @@ describe("plugin_settings mutation events — scoped to the namespace owner, not
   });
 });
 
+describe("dashboard SSE: wallet directory events for the Wallets panel", () => {
+  test("a wallet-vault row change reaches the stream as event plugin_settings; lane test vaults do not", async () => {
+    const ac = new AbortController();
+    const res = await fetch(`${baseUrl}/dashboard/stream?token=${TOKEN}`, { signal: ac.signal });
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    const put = (ns: string, key: string, value: unknown) => fetch(`${baseUrl}/plugin_settings/${ns}/${encodeURIComponent(key)}?token=${TOKEN}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value }),
+    });
+    await reader.read().then((r) => { buf += dec.decode(r.value); }); // initial agent state
+    expect((await put("wallet-vault-fv", "wallet:0xfff", { name: "lane-test" })).status).toBe(200);
+    expect((await put("wallet-vault", "wallet:0xabc", { name: "w", access: { mode: "specific", agents: ["a"] } })).status).toBe(200);
+    const deadline = Date.now() + 3000;
+    while (!buf.includes("event: plugin_settings") && Date.now() < deadline) {
+      const r = await Promise.race([reader.read(), new Promise<any>((ok) => setTimeout(() => ok({ value: undefined }), 500))]);
+      if (r.value) buf += dec.decode(r.value);
+    }
+    ac.abort();
+    const ev = buf.split("\n\n").filter((b) => b.startsWith("event: plugin_settings"));
+    expect(ev.length).toBe(1);
+    const data = JSON.parse(ev[0].split("\ndata: ")[1]);
+    expect(data.topic).toBe("plugin_settings.updated");
+    expect(data.payload.namespace).toBe("wallet-vault");
+    expect(data.payload.key).toBe("wallet:0xabc");
+    expect(data.payload.value.access.agents).toEqual(["a"]);
+    expect(buf).not.toContain("lane-test");
+  });
+});
+
 describe("POST /agents/register — only PERMANENT agents (personai) may sponsor a new ephemeral", () => {
   function b64url(bytes: Uint8Array): string {
     return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

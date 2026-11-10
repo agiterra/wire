@@ -6,11 +6,12 @@
 // Persona rows get Restart / Run-as / credential status (2026-09-02). Same markup on the server
 // render and the SSE re-render; the JS binds by data-* attributes.
 const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
-import { AGENT_CELL_HELPERS, agentNameCell, machineCell, relTime, tapFull } from "./dashboard-agent-cells.js";
-import { SESSION_CARD_CSS, SESSION_CARD_HELPERS } from "./dashboard-session-cards.js";
+import { AGENT_CELL_HELPERS } from "./dashboard-agent-cells.js";
+import { SESSION_CARD_CSS, SESSION_CARD_HELPERS, agentCards } from "./dashboard-session-cards.js";
+import { WALLET_HELPERS, WALLET_NAMESPACE } from "./dashboard-wallets.js";
 import { hostname } from "os";
 import { execFileSync } from "child_process";
-import { isPodLane, POD_VIEW_UID } from "./peek-screen.js";
+import { POD_VIEW_UID } from "./peek-screen.js";
 
 /** ssh host a cockpit uses to reach THIS Wire's machine for a pod-lane attach. */
 const POD_VIEW_HOST = process.env.WIRE_POD_VIEW_HOST || "patisserie.tail3ef8a5.ts.net";
@@ -36,40 +37,10 @@ function localMachine(): { name: string; aliases: string[] } {
 }
 const MACHINE_HERE = localMachine();
 
-function personaControls(id: string): string {
-  const opts = PERSONA_PRESETS.map(([h, m, label]) => `<option value="${h} ${m}">${label}</option>`).join("");
-  return `<span class="persona-status" data-pstatus="${id}" title="harness · credential">checking</span>` +
-    `<button data-restart="${id}" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>` +
-    `<select data-runas="${id}" title="Switch harness/model and restart"><option value="">run as</option>${opts}</select>`;
-}
-
 export function renderDashboard(agents: any[], operatorName: string): string {
-  const agentRows = agents.map((a: any) => {
-    const status = a.online ? "●" : "○";
-    const statusColor = a.online ? "#4ade80" : "#6b7280";
-    const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : "never";
-    const typeBadge = a.permanent
-      ? '<span class="badge badge-personai">personai</span>'
-      : '<span class="badge badge-ephemeral">ephemeral</span>';
-    const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) : "—";
-    return `
-      <tr class="agent-row" data-agent="${esc(a.id)}">
-        <td><span style="color:${statusColor}">${status}</span></td>
-        <td class="agent-name">${agentNameCell(a, {})}</td>
-        <td class="dim">${machineCell(a, MACHINE_HERE, {})}</td>
-        <td class="badge-cell">${typeBadge}</td>
-        <td class="dim">${tapFull("key:" + a.id, pubkeyShort, a.pubkey || "—", {})}</td>
-        <td class="dim">${a.sessions}</td>
-        <td class="dim">${tapFull("seen:" + a.id, relTime(a.last_seen_at, Date.now()), lastSeen, {})}</td>
-        <td class="agent-actions">
-          <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
-          <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
-          <a class="row-btn" href="${esc(attachHref(a))}" title="Attach this agent's screen in a new iTerm2 tab">📺 attach</a>
-          ${PERSONA_IDS.has(a.id) ? personaControls(a.id) : ""}
-        </td>
-      </tr>
-      <tr><td colspan="8" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
-  }).join("\n");
+  // First paint: one card per Wire registry row, session fields "—" until the client's first GET /sessions (ms later).
+  const cardCtx = { here: MACHINE_HERE, personaIds: [...PERSONA_IDS], presets: PERSONA_PRESETS, podView: { host: POD_VIEW_HOST, uid: POD_VIEW_UID }, pstatus: {} };
+  const cardsHtml = agentCards(agents, null, Date.now(), cardCtx, {});
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -125,8 +96,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       border-bottom: 1px solid #141414;
       vertical-align: top;
     }
-    .agent-row { cursor: pointer; }
-    .agent-row:hover { background: #111; }
     .agent-name { white-space: normal; overflow-wrap: anywhere; }
     .agent-label { color: #60a5fa; font-weight: 500; cursor: pointer; }
     .chips { margin-left: 6px; }
@@ -135,24 +104,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .agent-detail { margin: 4px 0 2px; padding: 4px 8px; border-left: 2px solid #1e3a5f; color: #a1a1aa; font-size: 0.9em; }
     .tapfull { cursor: pointer; }
     .tapfull.open { white-space: normal; overflow-wrap: anywhere; color: #e5e5e5; }
-    td:has(.tapfull.open) { white-space: normal; }
     .badge { font-size: 0.7em; padding: 1px 5px; border-radius: 3px; font-weight: 400; vertical-align: middle; }
     .badge-personai { background: #1e3a5f; color: #60a5fa; }
     .badge-ephemeral { background: #3f3f00; color: #facc15; }
-    table { width: 100%; border-collapse: collapse; table-layout: auto; }
-    col.col-status { width: 24px; }
-    col.col-name { }
-    col.col-machine { width: 1%; }
-    col.col-type { width: 80px; }
-    col.col-key { width: 100px; }
-    col.col-sessions { width: 70px; }
-    col.col-seen { width: 90px; }
-    col.col-actions { }
-    .badge-cell { white-space: nowrap; }
-    td, th { white-space: nowrap; }
+    table { border-collapse: collapse; }
     th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
     .agent-plan {
-      padding: 2px 0 8px 28px;
       white-space: normal;
       overflow-wrap: anywhere;
       color: #a1a1aa;
@@ -170,12 +127,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .agent-plan del { color: #6b7280; }
     .agent-plan ul, .agent-plan ol { margin: 2px 0 2px 20px; }
     .agent-plan li { margin: 1px 0; }
-    /* Auto layout: every column except Agent shrinks to its content on ONE line (width:1% + nowrap), the Agent
-       column takes what is left and wraps if it must. The persona model/cred status is never cropped and never
-       wraps (Tim 2026-10-22: "No need to wrap. It should fit on the line. Just give it a min width."). */
-    tr.agent-row > td:not(.agent-name), thead th:not(:nth-child(2)) { width: 1%; white-space: nowrap; }
-    td.agent-actions { overflow: visible; text-overflow: clip; }
-    td.agent-name { min-width: 160px; }
     .agent-actions button { padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; }
     .agent-actions button:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
     .agent-actions .row-btn { display: inline-block; padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; text-decoration: none; line-height: inherit; }
@@ -333,7 +284,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .json-bracket { color: #525252; }
     .json-comma { color: #525252; }
     .json-preview { color: #3f3f46; }
-    /* token strip: one cell per harness pool; red = empty or credential dead, amber = >=80% */
+    /* top strip: host and testnet pool cells; red = flagged, amber = near a limit */
     .usage-strip { display: flex; gap: 10px; margin: 0 0 16px 0; flex-wrap: wrap; }
     .usage-cell { border: 1px solid #333; border-radius: 4px; padding: 6px 10px; min-width: 170px; background: #111118; font-size: 12px; }
     .usage-cell .usage-label { color: #a1a1aa; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
@@ -351,30 +302,10 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .persona-status { font-size: 11px; margin: 0 6px; color: #a1a1aa; white-space: nowrap; }
     .persona-status .pst-ok { color: #4ade80; }
     .persona-status .pst-red { color: #f87171; font-weight: bold; }
-    /* Narrow width (<=1150px, phones): the 7-column table cannot fit, so each agent row becomes a wrapping line (name, type, seen,
-       then the actions) and Key/Sessions are dropped (the key stays reachable via peek/msg). Same nth-child order
-       on the server render and the SSE re-render. */
-    @media (max-width: 1400px) {
-      thead th:nth-child(5), thead th:nth-child(6), tr.agent-row > td:nth-child(5), tr.agent-row > td:nth-child(6) { display: none; }
-    }
     @media (max-width: 1150px) {
-      table, tbody { display: block; width: 100%; }
-      colgroup, thead { display: none; }
-      tr.agent-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding-top: 6px; }
-      tr.agent-row > td, tr.agent-row > td:not(.agent-name) { display: block; width: auto; padding: 2px 0; border: 0; overflow: visible; white-space: normal; }
-      .persona-status { white-space: normal; }
-      tr.agent-row > td:nth-child(2) { flex: 1 1 calc(100% - 32px); }
-      tr.agent-row > td:nth-child(5), tr.agent-row > td:nth-child(6) { display: none; }
-      tr.agent-row > td.agent-actions { flex: 1 1 100%; }
-      tr.agent-row > td { min-width: 0; max-width: 100%; }
-      td.agent-actions { white-space: normal; }
-      .agent-actions > * { margin-bottom: 4px; }
-      .chips { white-space: normal; }
       body { padding: 16px; }
       header { flex-wrap: wrap; gap: 4px; }
       .form-row { flex-wrap: wrap; }
-      tr:not(.agent-row) { display: block; }
-      td.agent-plan { display: block; padding-left: 16px; }
     }
     .agent-actions select { padding: 2px 4px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; font-family: inherit; }
     .stats {
@@ -385,6 +316,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .stat-value { color: #fafafa; font-weight: 600; }
     /* Wallets panel */
+    .wallets-summary { cursor: pointer; display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+    .wallets-summary h2 { margin-bottom: 0; }
     .wallets-empty { color: #525252; font-size: 12px; padding: 12px 0; }
     .wallet-row { border-bottom: 1px solid #141414; padding: 8px 0; }
     .wallet-row:last-child { border-bottom: none; }
@@ -469,44 +402,20 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     <div><span class="stat-value">${agents.reduce((n: number, a: any) => n + a.sessions, 0)}</span> sessions</div>
   </div>
 
-  <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">tokens</div><div class="usage-vals">loading</div></div></div>
+  <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">host</div><div class="usage-vals">loading</div></div></div>
 
-  <h2>Agent Sessions</h2>
-  <div id="session-cards"><div class="sc-empty">loading</div></div>
-
-  <h2>Agent Registry</h2>
-  <table>
-    <colgroup>
-      <col class="col-status">
-      <col class="col-name">
-      <col class="col-machine">
-      <col class="col-type">
-      <col class="col-key">
-      <col class="col-sessions">
-      <col class="col-seen">
-      <col class="col-actions">
-    </colgroup>
-    <thead>
-      <tr>
-        <th></th>
-        <th>Agent</th>
-        <th>Machine</th>
-        <th>Type</th>
-        <th>Key</th>
-        <th>Sessions</th>
-        <th>Seen</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      ${agentRows}
-    </tbody>
-  </table>
+  <h2>Agents</h2>
+  <div id="sessions-head"><div class="sc-empty">loading sessions</div></div>
+  <div id="agent-cards" class="sc-cards">${cardsHtml}</div>
+  <div id="sessions-foot"></div>
   <div id="peek-dock"></div>
 
   <div class="form-section">
-    <h2>Wallets</h2>
-    <div id="wallets-panel" class="wallets-empty">Loading</div>
+    <details id="wallets-details">
+      <summary class="wallets-summary"><h2>Wallets</h2><span id="wallets-count" class="msg-log-count">loading</span></summary>
+      <div class="form-row"><input type="text" id="wallets-filter" placeholder="filter: name, address, creator, agent" style="flex:1"></div>
+      <div id="wallets-panel" class="wallets-empty">Loading</div>
+    </details>
   </div>
 
   <div class="form-section">
@@ -543,14 +452,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     // --- Persona Restart / Run-as / credential status (POST /agents/:id/persona-action) ---
     const PERSONA_IDS_JS = ${JSON.stringify([...PERSONA_IDS])};
     const MACHINE_HERE = ${JSON.stringify(MACHINE_HERE)};
-    const PERSONA_PRESETS_JS = [['claude-code','claude-fable-5-1','Claude Fable 5.1'],['grok','grok-4.6','Grok 4.6'],['codex','gpt-5.6-sol','Codex Sol']];
-    function personaControlsJs(id) {
-      const opts = PERSONA_PRESETS_JS.map(p => '<option value="' + p[0] + ' ' + p[1] + '">' + p[2] + '</option>').join('');
-      const st = personaStatusCache[id] || 'checking';
-      return '<span class="persona-status" data-pstatus="' + esc(id) + '" title="harness · credential">' + st + '</span>' +
-        '<button data-restart="' + esc(id) + '" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>' +
-        '<select data-runas="' + esc(id) + '" title="Switch harness/model and restart"><option value="">run as</option>' + opts + '</select>';
-    }
+    const PERSONA_PRESETS_JS = ${JSON.stringify(PERSONA_PRESETS)};
     const personaStatusCache = {};
     function renderPersonaStatus(id, r) {
       let html;
@@ -588,30 +490,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         if (dock) { const panel = document.createElement('div'); panel.className = 'peek-output'; panel.innerHTML = '<div class="peek-header">' + esc(id) + ' ' + esc(action) + '</div>' + esc(JSON.stringify(r, null, 2)); dock.prepend(panel); }
       }
     }
-    function bindPersonaControls(root) {
-      root.querySelectorAll('[data-restart]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); personaAction(el.dataset.restart, 'restart'); }; });
-      root.querySelectorAll('[data-runas]').forEach(el => { el.onchange = (e) => { e.stopPropagation(); const v = el.value; el.value = ''; if (!v) return; const [h, m] = v.split(' '); personaAction(el.dataset.runas, 'run-as', h, m); }; });
-    }
-    bindPersonaControls(document);
     document.querySelectorAll('[data-pstatus]').forEach(el => { const id = el.dataset.pstatus; if (!personaStatusCache[id]) personaAction(id, 'check'); });
 
-    // --- Token strip (GET /usage, polled every 60s; never invents a number) ---
-    function relTime(iso) {
-      if (!iso) return '';
-      const ms = new Date(iso).getTime() - Date.now();
-      if (isNaN(ms)) return '';
-      if (ms <= 0) return 'reset due';
-      const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
-      return h >= 24 ? 'resets in ' + Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : 'resets in ' + h + 'h ' + m + 'm';
-    }
+    // --- Top strip: Host and Pool cells (GET /usage, polled every 60s; never invents a number). The Claude / Codex /
+    // Grok / "as of" cells were removed 2026-11-10 (Tim: "redundant or useless"): the per-vendor burn strip above the
+    // agent cards shows the same meters with rate and time left.
     function pctNum(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
-    function stateFor(pcts, dead) {
-      if (dead) return 'red';
-      const known = pcts.filter(p => p !== null && !isNaN(p));
-      if (!known.length) return 'unknown';
-      const mx = Math.max.apply(null, known);
-      return mx >= 95 ? 'red' : (mx >= 80 ? 'amber' : 'ok');
-    }
     // noteIsHtml: the caller built the note from esc()'d pieces itself (e.g. a copyable span) — pass it through unescaped.
     function usageCell(label, state, vals, note, noteIsHtml) {
       return '<div class="usage-cell ' + state + '"><div class="usage-label">' + esc(label) + '</div>' +
@@ -642,40 +526,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       try {
         const res = await fetch('/usage');
         const j = await res.json();
-        if (!j.ok) { el.innerHTML = usageCell('tokens', 'red', [['meter file', 'unreadable', '']], j.error || j.file); return; }
-        const d = j.data || {};
-        const ageMin = (Date.now() - new Date(d.as_of || j.file_mtime).getTime()) / 60000;
-        const stale = isNaN(ageMin) ? '' : (ageMin > 30 ? ' <span class="usage-stale">stale ' + Math.round(ageMin) + 'm</span>' : '');
-        const sd = d.seven_day || {}, fh = d.five_hour || {}, fw = d.fable_weekly || {};
-        const cDead = d.claude_status && d.claude_status !== 'live';
-        const cp = [pctNum(sd.used_percent), pctNum(fh.used_percent), pctNum(fw.used_percent)];
         const fmt = p => p === null ? '—' : p + '%';
-        // One Claude cell per ACCOUNT SLOT (root's claude-account.sh publishes /tmp/claude-accounts.json;
-        // Tim 2026-09-03: both accounts' stats, labeled; the fleet-wide switch was removed 2026-10-22, Tim: agents
-        // no longer move all at once). Falls back to the single legacy cell.
-        const acc = j.accounts && Array.isArray(j.accounts.slots) ? j.accounts : null;
-        let claude = '';
-        if (acc && acc.slots.length) {
-          for (const sl of acc.slots) {
-            const u = sl.usage || {}; const live = u.status === 'live';
-            const p = [pctNum((u.session || {}).used_percent), pctNum((u.weekly || {}).used_percent), pctNum((u.fable || {}).used_percent)];
-            const lbl = 'Claude · ' + sl.slot + (sl.active ? ' ✓' : '');
-            claude += usageCell(lbl, live ? stateFor(p, false) : 'unknown',
-              [['5h', fmt(p[0]), relTime((u.session || {}).resets_at)], ['7d', fmt(p[1]), relTime((u.weekly || {}).resets_at)], ['Fable', fmt(p[2]), relTime((u.fable || {}).resets_at)]],
-              (sl.email || '') + (live ? ' · token ' + Math.round((sl.minutes_left || 0) / 60) + 'h left' : ' · ' + (u.status || 'no usage read')));
-          }
-        } else {
-          claude = usageCell('Claude', stateFor(cp, cDead),
-            [['7d', fmt(cp[0]), relTime(sd.resets_at)], ['5h', fmt(cp[1]), relTime(fh.resets_at)], ['Fable', fmt(cp[2]), relTime(fw.resets_at)]],
-            cDead ? 'credential/probe: ' + d.claude_status : relTime(fh.resets_at));
-        }
-        const g = (d.grok || {}).weekly_page || {};
-        const gp = pctNum(g.used_percent);
-        const grok = usageCell('Grok', stateFor([gp], false), [['weekly', fmt(gp), relTime(g.resets_at)]],
-          gp === null ? 'no live scrape — ' + relTime(g.resets_at) : relTime(g.resets_at));
-        const x = ((d.codex || {}).primary) || {};
-        const xp = pctNum(x.used_percent);
-        const codex = usageCell('Codex', stateFor([xp], false), [['weekly', fmt(xp), relTime(x.resets_at)]], relTime(x.resets_at));
         const h = j.host || null;
         let hostCell = usageCell('Host', 'unknown', [['mem', '—', ''], ['swap', '—', ''], ['disk', '—', '']], 'no host meter');
         if (h && h.mem) {
@@ -700,100 +551,87 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         } else if (pl) {
           poolCell = usageCell('Pool', 'red', [['pool', 'unreadable', '']], pl.error || pl.status);
         }
-        el.innerHTML = claude + grok + codex + hostCell + poolCell + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
+        el.innerHTML = hostCell + poolCell;
         el.querySelectorAll('[data-copy]').forEach(c => { c.onclick = (e) => { e.stopPropagation(); copy(c.dataset.copy, c); }; });
       } catch (e) {
-        el.innerHTML = usageCell('tokens', 'red', [['/usage', 'failed', '']], String(e));
+        el.innerHTML = usageCell('host', 'red', [['/usage', 'failed', '']], String(e));
       }
     }
     loadUsage();
     setInterval(loadUsage, 60000);
 
-    // --- Agent session cards (GET /sessions, polled every 30s; the file is fondant's agent-sessions watch) ---
+    // --- Agent cards: the ONLY agent list (Tim 2026-11-10: "The cards replace the list."). The agent set is the Wire
+    // registry, pushed by SSE every 3s; each card is joined by id to GET /sessions (fondant's agent-sessions watch,
+    // polled every 30s). One render function for the server's first paint and every re-render here.
     ${SESSION_CARD_HELPERS}
+    let lastAgents = null;
+    let lastSessions = null;
+    // Tap-open state (name details, full key, full host, exact Seen time), kept across re-renders.
+    const openCells = {};
+    function cardCtx() {
+      return { here: MACHINE_HERE, personaIds: PERSONA_IDS_JS, presets: PERSONA_PRESETS_JS, podView: POD_VIEW, pstatus: personaStatusCache, plan: renderPlan };
+    }
+    function renderCards() {
+      if (!lastAgents) return;
+      const el = document.getElementById('agent-cards');
+      // An open run-as dropdown would be destroyed under the viewer's pointer: skip this tick, the next one catches up.
+      const act = document.activeElement;
+      if (act && act.tagName === 'SELECT' && el.contains(act)) return;
+      el.innerHTML = agentCards(lastAgents, lastSessions, Date.now(), cardCtx(), openCells);
+    }
     async function loadSessions() {
-      const el = document.getElementById('session-cards');
+      const head = document.getElementById('sessions-head');
+      const foot = document.getElementById('sessions-foot');
       try {
         const res = await fetch('/sessions');
-        const j = await res.json();
-        const open = el.querySelector('details.sc-fin') && el.querySelector('details.sc-fin').open;
-        el.innerHTML = sessionSection(j, Date.now());
-        if (open) { const d = el.querySelector('details.sc-fin'); if (d) d.open = true; }
+        lastSessions = await res.json();
       } catch (e) {
-        el.innerHTML = '<div class="sc-empty">/sessions failed: ' + esc(String(e)) + '</div>';
+        lastSessions = { ok: false, error: '/sessions failed: ' + String(e) };
       }
+      const fin = foot.querySelector('details.sc-fin');
+      const wasOpen = !!(fin && fin.open);
+      head.innerHTML = sessionHead(lastSessions, Date.now());
+      foot.innerHTML = sessionFoot(lastSessions);
+      if (wasOpen) { const d = foot.querySelector('details.sc-fin'); if (d) d.open = true; }
+      renderCards();
     }
-    loadSessions();
-    setInterval(loadSessions, 30000);
+    // Every card control is bound once, here, by delegation: re-renders replace the markup, never the handlers.
+    const cardsEl = document.getElementById('agent-cards');
+    cardsEl.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-toggle],[data-copy],[data-peek],[data-msg],[data-restart]');
+      if (!t || !cardsEl.contains(t)) return;
+      e.stopPropagation();
+      if (t.dataset.toggle !== undefined) {
+        const k = t.dataset.toggle;
+        if (openCells[k]) delete openCells[k]; else openCells[k] = true;
+        renderCards();
+      } else if (t.dataset.copy !== undefined) copy(t.dataset.copy, t);
+      else if (t.dataset.peek !== undefined) peek(t.dataset.peek);
+      else if (t.dataset.msg !== undefined) promptSend(t.dataset.msg);
+      else if (t.dataset.restart !== undefined) personaAction(t.dataset.restart, 'restart');
+    });
+    cardsEl.addEventListener('change', (e) => {
+      const el = e.target.closest('[data-runas]');
+      if (!el) return;
+      const v = el.value; el.value = '';
+      if (el.blur) el.blur();
+      if (!v) return;
+      const sp = v.split(' ');
+      personaAction(el.dataset.runas, 'run-as', sp[0], sp[1]);
+    });
 
     // --- Live SSE updates ---
     const evtSource = new EventSource('/dashboard/stream');
     evtSource.addEventListener('refresh', () => window.location.reload());
-    // Tap-open state for registry cells (name details, full key, exact Seen time). Kept here so
-    // the 3s SSE re-render does not close what the viewer opened.
-    const openCells = {};
-    document.querySelector('tbody').addEventListener('click', (e) => {
-      const t = e.target.closest('[data-toggle]');
-      if (!t) return;
-      e.stopPropagation();
-      const k = t.dataset.toggle;
-      if (openCells[k]) delete openCells[k]; else openCells[k] = true;
-      if (lastAgents) renderAgents(lastAgents);
-    });
-    let lastAgents = null;
     evtSource.onmessage = (e) => {
       lastAgents = JSON.parse(e.data);
-      renderAgents(lastAgents);
-    };
-    function renderAgents(agents) {
-
-      // Update stats
       document.querySelector('.stats').innerHTML = [
-        '<div><span class="stat-value">' + agents.length + '</span> agents</div>',
-        '<div><span class="stat-value">' + agents.filter(a => a.online).length + '</span> online</div>',
-        '<div><span class="stat-value">' + agents.reduce((n, a) => n + a.sessions, 0) + '</span> sessions</div>',
+        '<div><span class="stat-value">' + lastAgents.length + '</span> agents</div>',
+        '<div><span class="stat-value">' + lastAgents.filter(a => a.online).length + '</span> online</div>',
+        '<div><span class="stat-value">' + lastAgents.reduce((n, a) => n + a.sessions, 0) + '</span> sessions</div>',
       ].join('');
-
-      // Update table body — preserve expanded state
-      const tbody = document.querySelector('tbody');
-      tbody.innerHTML = agents.map(a => {
-        const status = a.online ? '●' : '○';
-        const statusColor = a.online ? '#4ade80' : '#6b7280';
-        const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : 'never';
-        const typeBadge = a.permanent
-          ? '<span class="badge badge-personai">personai</span>'
-          : '<span class="badge badge-ephemeral">ephemeral</span>';
-        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) : '—';
-        return '<tr class="agent-row" data-agent="' + esc(a.id) + '">' +
-          '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name">' + agentNameCell(a, openCells) + '</td>' +
-          '<td class="dim">' + machineCell(a, MACHINE_HERE, openCells) + '</td>' +
-          '<td class="badge-cell">' + typeBadge + '</td>' +
-          '<td class="dim">' + tapFull('key:' + a.id, pubkeyShort, a.pubkey || '—', openCells) + '</td>' +
-          '<td class="dim">' + a.sessions + '</td>' +
-          '<td class="dim">' + tapFull('seen:' + a.id, relTime(a.last_seen_at, Date.now()), lastSeen, openCells) + '</td>' +
-          '<td class="agent-actions">' +
-            '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
-            '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
-            '<a class="row-btn" href="' + esc(attachHref(a)) + '" title="Attach this agent\\'s screen in a new iTerm2 tab">📺 attach</a>' +
-            (PERSONA_IDS_JS.indexOf(a.id) >= 0 ? personaControlsJs(a.id) : '') +
-          '</td>' +
-          '</tr>' +
-          '<tr><td colspan="8" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
-      }).join('');
-
-      // Bind handlers
-      tbody.querySelectorAll('[data-copy]').forEach(el => {
-        el.onclick = (e) => { e.stopPropagation(); copy(el.dataset.copy, el); };
-      });
-      tbody.querySelectorAll('[data-peek]').forEach(el => {
-        el.onclick = (e) => { e.stopPropagation(); peek(el.dataset.peek); };
-      });
-      tbody.querySelectorAll('[data-msg]').forEach(el => {
-        el.onclick = (e) => { e.stopPropagation(); promptSend(el.dataset.msg); };
-      });
-      bindPersonaControls(tbody);
-    }
+      renderCards();
+    };
 
     // --- Message log ---
     let msgCount = 0;
@@ -880,15 +718,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     evtSource.addEventListener('wire_message', (e) => {
       const msg = JSON.parse(e.data);
       addMessageEntry(msg);
-      // Live-refresh the Wallets panel when plugin_settings.wallet-vault.wallets
-      // changes (via operator edits here, or extension publishes elsewhere).
-      let parsed = msg.content;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch {}
-      }
-      if (window.refreshWalletsIfRelevant) {
-        window.refreshWalletsIfRelevant({ topic: msg.topic, payload: parsed });
-      }
+    });
+    // Wallet directory changes (namespace wallet-vault only) arrive as their own SSE event; the IPC log above never
+    // carried plugin_settings topics, so the old hook in this listener could not fire.
+    evtSource.addEventListener('plugin_settings', (e) => {
+      try { refreshWalletsIfRelevant(JSON.parse(e.data)); } catch (err) { console.error('wallets: bad plugin_settings event', err, e.data); }
     });
 
     // Backfill recent messages via REST (API returns oldest-first)
@@ -903,17 +737,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
     }
 
-    // Mirror of the server-side attachHref() — see dashboard.ts. Keep in sync.
     const POD_VIEW = ${JSON.stringify({ host: POD_VIEW_HOST, uid: POD_VIEW_UID })};
-    function attachHref(a) {
-      const pod = !a.run_as_uid && /^bk-node-[A-Za-z0-9-]+$/.test(a.ssh_host || '');
-      return 'wire-attach://attach?' + new URLSearchParams({
-        agent: a.id,
-        host: pod ? POD_VIEW.host : (a.ssh_host || 'local'),
-        user: pod ? POD_VIEW.uid : (a.run_as_uid || ''),
-        screen: pod ? 'pod:' + a.ssh_host : (a.screen_name || a.id),
-      }).toString();
-    }
 
     function renderPlan(src) {
       if (!src) return '';
@@ -925,13 +749,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       el.innerHTML = renderPlan(raw);
     });
 
-    // Bind initial peek/msg buttons
-    document.querySelectorAll('[data-peek]').forEach(function(el) {
-      el.onclick = function(e) { e.stopPropagation(); peek(el.dataset.peek); };
-    });
-    document.querySelectorAll('[data-msg]').forEach(function(el) {
-      el.onclick = function(e) { e.stopPropagation(); promptSend(el.dataset.msg); };
-    });
 
     function renderJson(val, depth) {
       const frag = document.createDocumentFragment();
@@ -1049,124 +866,89 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       });
     }
 
-    // ---- Wallets panel ----
-    let walletsCache = {};
-
+    // ---- Wallets panel: namespace wallet-vault, one row per wallet (key wallet:<address>); see dashboard-wallets.ts ----
+    ${WALLET_HELPERS}
+    const WALLET_NS = ${JSON.stringify(WALLET_NAMESPACE)};
+    let walletRaw = {};
+    let walletDir = [];
+    function renderWallets() {
+      walletDir = walletDirectory(walletRaw);
+      const q = document.getElementById('wallets-filter').value;
+      const shown = walletDir.filter(w => walletMatches(w, q)).length;
+      document.getElementById('wallets-count').textContent = '(' + (q ? shown + ' of ' : '') + walletDir.length + ' in ' + WALLET_NS + ')';
+      const panel = document.getElementById('wallets-panel');
+      panel.className = walletDir.length ? '' : 'wallets-empty';
+      panel.innerHTML = walletList(walletDir, q);
+    }
     async function loadWallets() {
       const panel = document.getElementById('wallets-panel');
       try {
-        const res = await fetch('/plugin_settings/wallet-vault/wallets');
-        if (res.status === 404) {
-          walletsCache = {};
-          renderWallets();
-          return;
-        }
-        if (!res.ok) {
-          panel.textContent = 'Failed to load wallets (' + res.status + ')';
-          return;
-        }
-        const body = await res.json();
-        walletsCache = body.value || {};
+        const res = await fetch('/plugin_settings/' + encodeURIComponent(WALLET_NS));
+        if (!res.ok) { panel.textContent = 'Failed to load wallets (' + res.status + ')'; document.getElementById('wallets-count').textContent = '(unreadable)'; return; }
+        walletRaw = await res.json();
         renderWallets();
       } catch (e) {
+        console.error('wallets: load failed', e);
         panel.textContent = 'Error loading wallets: ' + (e.message || e);
       }
     }
-
-    function renderWallets() {
-      const panel = document.getElementById('wallets-panel');
-      const addrs = Object.keys(walletsCache);
-      if (addrs.length === 0) {
-        panel.className = 'wallets-empty';
-        panel.textContent = '(no wallets yet)';
-        return;
-      }
-      panel.className = '';
-      panel.innerHTML = addrs.map(addr => {
-        const w = walletsCache[addr];
-        const name = w.operator_name || w.name;
-        const shortAddr = addr;
-        const accessControls = w.access.mode === 'all'
-          ? '<span class="wallet-access-disabled">all registered agents</span>'
-          : (w.access.mode === 'creator-only'
-              ? '<span class="wallet-access-disabled">creator only (' + esc(w.creator) + ')</span>'
-              : (w.access.agents.map(ag =>
-                  '<span class="wallet-member-chip">' + esc(ag) +
-                  '<span class="wallet-member-revoke" onclick="revokeAgent(\\''+addr+'\\',\\''+esc(ag)+'\\')" title="Revoke">×</span></span>'
-                ).join('') +
-                '<span class="wallet-grant"><input type="text" placeholder="agent-id" id="grant-'+addr+'"><button onclick="grantAgent(\\''+addr+'\\')">+grant</button></span>'));
-        return '<div class="wallet-row">' +
-          '<div class="wallet-head">' +
-            '<span class="wallet-name">' + esc(name) + '</span>' +
-            '<span class="wallet-addr copyable" onclick="copy(\\''+addr+'\\',this)" title="Click to copy">' + esc(shortAddr) + '</span>' +
-            '<span class="wallet-chain">chain ' + w.chain_id + '</span>' +
-            '<span class="wallet-creator">creator: ' + esc(w.creator) + '</span>' +
-            'mode: <select class="wallet-mode-select" onchange="setMode(\\''+addr+'\\',this.value)">' +
-              ['creator-only', 'specific', 'all'].map(m =>
-                '<option value="'+m+'"' + (w.access.mode === m ? ' selected' : '') + '>'+m+'</option>'
-              ).join('') +
-            '</select>' +
-          '</div>' +
-          '<div class="wallet-members">' + accessControls + '</div>' +
-        '</div>';
-      }).join('');
-    }
-
-    async function putWallets(updated) {
-      const res = await fetch('/plugin_settings/wallet-vault/wallets', {
+    // Writes the ONE wallet row the edit touches; the vault receives it as a scoped plugin_settings.updated event.
+    async function putWallet(key, value) {
+      const res = await fetch('/plugin_settings/' + encodeURIComponent(WALLET_NS) + '/' + encodeURIComponent(key), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value: updated }),
+        body: JSON.stringify({ value }),
       });
       if (!res.ok) {
-        alert('Update failed (' + res.status + '): ' + await res.text().catch(() => ''));
+        alert('Update of ' + key + ' failed (' + res.status + '): ' + await res.text().catch(() => ''));
         return false;
       }
+      walletRaw[key] = value;
+      renderWallets();
       return true;
     }
-
-    async function grantAgent(addr) {
-      const input = document.getElementById('grant-' + addr);
-      const agentId = input.value.trim();
-      if (!agentId) return;
-      const next = JSON.parse(JSON.stringify(walletsCache));
-      const w = next[addr];
-      if (w.access.mode === 'creator-only') w.access.mode = 'specific';
-      if (!w.access.agents.includes(agentId)) w.access.agents.push(agentId);
-      if (await putWallets(next)) {
-        input.value = '';
-        await loadWallets();
+    function walletEntry(key) { return walletDir.find(w => w.key === key) || null; }
+    async function editWallet(key, op) {
+      const ent = walletEntry(key);
+      if (!ent) { alert('wallet ' + key + ' is no longer in the directory'); return; }
+      return putWallet(key, walletEdit(ent.w, op));
+    }
+    const walletsPanel = document.getElementById('wallets-panel');
+    walletsPanel.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-copy],[data-wrevoke],[data-wgrant]');
+      if (!t || !walletsPanel.contains(t)) return;
+      if (t.dataset.copy !== undefined) copy(t.dataset.copy, t);
+      else if (t.dataset.wrevoke !== undefined) {
+        if (confirm('Revoke ' + t.dataset.agent + ' from ' + t.dataset.wrevoke + '?')) editWallet(t.dataset.wrevoke, { revoke: t.dataset.agent });
+      } else if (t.dataset.wgrant !== undefined) {
+        const input = t.parentElement.querySelector('input');
+        const agentId = input ? input.value.trim() : '';
+        if (agentId) editWallet(t.dataset.wgrant, { grant: agentId });
       }
+    });
+    walletsPanel.addEventListener('keydown', (e) => {
+      const input = e.target.closest('[data-wgrant-input]');
+      if (input && e.key === 'Enter' && input.value.trim()) editWallet(input.dataset.wgrantInput, { grant: input.value.trim() });
+    });
+    walletsPanel.addEventListener('change', (e) => {
+      const sel = e.target.closest('[data-wmode]');
+      if (sel) editWallet(sel.dataset.wmode, { mode: sel.value });
+    });
+    document.getElementById('wallets-filter').addEventListener('input', renderWallets);
+    // A per-wallet row (or the legacy 'wallets' blob) changed: patch the raw listing and re-render.
+    function refreshWalletsIfRelevant(msg) {
+      const p = msg && msg.payload;
+      if (!p || p.namespace !== WALLET_NS || typeof p.key !== 'string') return;
+      if (p.key !== 'wallets' && p.key.indexOf('wallet:') !== 0) return;
+      if (msg.topic === 'plugin_settings.updated') walletRaw[p.key] = p.value;
+      else if (msg.topic === 'plugin_settings.deleted') delete walletRaw[p.key];
+      else return;
+      renderWallets();
     }
-
-    async function revokeAgent(addr, agentId) {
-      const next = JSON.parse(JSON.stringify(walletsCache));
-      next[addr].access.agents = next[addr].access.agents.filter(a => a !== agentId);
-      if (await putWallets(next)) await loadWallets();
-    }
-
-    async function setMode(addr, mode) {
-      const next = JSON.parse(JSON.stringify(walletsCache));
-      next[addr].access.mode = mode;
-      if (await putWallets(next)) await loadWallets();
-    }
-
-    // Refresh wallets when plugin_settings.updated arrives via SSE.
-    // The dashboard's existing stream listener (further down) calls
-    // refreshWalletsIfRelevant on every message; expose it globally.
-    window.refreshWalletsIfRelevant = function(msg) {
-      if (msg && msg.topic === 'plugin_settings.updated' && msg.payload &&
-          msg.payload.namespace === 'wallet-vault' && msg.payload.key === 'wallets') {
-        walletsCache = msg.payload.value || {};
-        renderWallets();
-      } else if (msg && msg.topic === 'plugin_settings.deleted' && msg.payload &&
-          msg.payload.namespace === 'wallet-vault' && msg.payload.key === 'wallets') {
-        walletsCache = {};
-        renderWallets();
-      }
-    };
 
     loadWallets();
+    loadSessions();
+    setInterval(loadSessions, 30000);
 
     async function generateKeypair() {
       const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
@@ -1182,8 +964,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
 
 
-    // Peek lives in #peek-dock, outside the agent table. SSE rebuilds tbody
-    // every 3s; a row inside it vanished. Click peek again to close.
+    // Peek lives in #peek-dock, outside the agent cards. SSE rebuilds the cards
+    // every 3s; a panel inside one would vanish. Click peek again to close.
     async function peek(agentId) {
       const existing = document.getElementById('peek-' + agentId);
       if (existing) { existing.remove(); return; }
@@ -1448,25 +1230,5 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/**
- * Build the wire-attach:// URL for an agent's click-to-attach button (Phase 2/3).
- * The native WireAttach.app registers the wire-attach:// scheme and opens the
- * agent's screen in a new iTerm2 tab. Falls back to 'local' host and the agent
- * id as screen name when the agent didn't self-report those columns.
- *
- * NOTE: an identical helper is inlined in the client SSE re-render <script>
- * below — the two render sites run in different contexts (server-side template
- * literal vs. browser string-concat) so the helper is duplicated, not imported.
- * Keep the two in sync.
- */
-function attachHref(a: any): string {
-  // Pod lane: no screen on the node. Attach runs on this Wire's host as POD_VIEW_UID;
-  // wire-attach-session.sh sees screen=pod:<node> and follows the pod session.
-  const pod = isPodLane(a);
-  return "wire-attach://attach?" + new URLSearchParams({
-    agent: a.id,
-    host: pod ? POD_VIEW_HOST : (a.ssh_host || "local"),
-    user: pod ? POD_VIEW_UID : (a.run_as_uid || ""),
-    screen: pod ? "pod:" + a.ssh_host : (a.screen_name || a.id),
-  }).toString();
-}
+// The attach button's wire-attach:// URL is built by cardAttachHref() in dashboard-session-cards.ts (one copy for the
+// server's first paint and the client re-render).
