@@ -5,7 +5,7 @@
 
 // Persona rows get Restart / Run-as / credential status (2026-09-02). Same markup on the server
 // render and the SSE re-render; the JS binds by data-* attributes.
-const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
+const PERSONA_PRESETS = [["claude-code", "claude-fable-5-2", "Claude Fable 5.2"], ["grok", "grok-4.7", "Grok 4.7"], ["codex", "gpt-6.1-sol", "Codex Sol 6.1"]];
 import { AGENT_CELL_HELPERS } from "./dashboard-agent-cells.js";
 import { SESSION_CARD_CSS, SESSION_CARD_HELPERS, agentCards } from "./dashboard-session-cards.js";
 import { WALLET_HELPERS, WALLET_NAMESPACE } from "./dashboard-wallets.js";
@@ -19,7 +19,7 @@ const POD_VIEW_HOST = process.env.WIRE_POD_VIEW_HOST || "patisserie.tail3ef8a5.t
 // The persona ids: only these get Restart / Run-as / credential status. Every other permanent agent (gaia,
 // wallet-vault, crew-svc@patisserie) is not a persona, and a check on it is refused by the server, which showed as a red
 // "check refused" on every page load (Tim, 2026-10-27: no "check" errors). server.ts imports this one copy.
-export const PERSONA_IDS = new Set((process.env.WIRE_PERSONA_IDS ?? "fondant,brioche,baguette,herald,vacherin").split(",").map((s) => s.trim()).filter(Boolean));
+export const PERSONA_IDS = new Set((process.env.WIRE_PERSONA_IDS ?? "fondant,brioche,baguette,herald,vacherin,pretzel").split(",").map((s) => s.trim()).filter(Boolean));
 
 // This broker's machine, for the Machine column: its short hostname, and every other name this box answers to
 // (macOS LocalHostName, e.g. "tims-mac-mini" for patisserie) so that a stale self-report maps to the same name.
