@@ -1174,14 +1174,15 @@ export class Store {
   }
 
   /**
-   * Messages this agent SENT after a seq, oldest first, optionally to one dest. Metadata only (no payload):
-   * the one consumer (bk-ingress) asks "did the persona answer this asker over Wire since seq N?".
+   * Messages this agent SENT after a seq, oldest first, optionally to one dest. Metadata only unless withPayload:
+   * the one consumer (bk-ingress) asks "did the persona answer THIS ask over Wire since seq N?", which needs the
+   * text to see which ask seq an answer names (2026-11-27: an answer to ask X suppressed the reply to ask Y).
    */
-  getSentMessages(source: string, afterSeq: number, dest?: string, limit = 100): Array<Pick<Message, "seq" | "dest" | "topic" | "created_at">> {
-    const sql = "SELECT seq, dest, topic, created_at FROM messages WHERE source = ? AND seq > ?"
+  getSentMessages(source: string, afterSeq: number, dest?: string, limit = 100, withPayload = false): Array<Pick<Message, "seq" | "dest" | "topic" | "created_at"> & { payload?: string }> {
+    const sql = `SELECT seq, dest, topic, created_at${withPayload ? ", payload" : ""} FROM messages WHERE source = ? AND seq > ?`
       + (dest ? " AND dest = ?" : "") + " ORDER BY seq ASC LIMIT ?";
     const args: Array<string | number> = dest ? [source, afterSeq, dest, limit] : [source, afterSeq, limit];
-    return this.db.prepare(sql).all(...args) as Array<Pick<Message, "seq" | "dest" | "topic" | "created_at">>;
+    return this.db.prepare(sql).all(...args) as Array<Pick<Message, "seq" | "dest" | "topic" | "created_at"> & { payload?: string }>;
   }
 
   // --- Delivery log ---

@@ -1048,7 +1048,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     return c.json({ agent_id: agentId, minutes, count: messages.length, messages });
   });
 
-  // An agent's OWN sent messages after a seq (metadata only). Own JWT or operator: the caller already knows
+  // An agent's OWN sent messages after a seq (metadata; bodies with include=payload). Own JWT or operator: the caller already knows
   // what it sent, so this leaks nothing; another agent's outbox stays private (403).
   app.get("/agents/:id/sent", async (c) => {
     const agentId = c.req.param("id");
@@ -1063,7 +1063,18 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (!Number.isInteger(afterSeq) || afterSeq < 0) return c.json({ error: "after_seq must be a non-negative integer" }, 400);
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return c.json({ error: "limit must be an integer 1-1000" }, 400);
     const dest = c.req.query("dest") || undefined;
-    const messages = store.getSentMessages(agentId, afterSeq, dest, limit);
+    // include=payload: the caller's OWN message bodies (inner payload, as /messages/recent unwraps it). Still own JWT
+    // or operator only, so it shows an agent nothing it did not write itself.
+    const withPayload = c.req.query("include") === "payload";
+    const rows = store.getSentMessages(agentId, afterSeq, dest, limit, withPayload);
+    const messages = withPayload ? rows.map(({ payload, ...m }) => {
+      let content: unknown = payload;
+      try {
+        const env = JSON.parse(payload ?? "");
+        content = env && typeof env === "object" && "payload" in env ? env.payload : env; // gateway envelope, or a bare body
+      } catch { /* not JSON: return the raw string */ }
+      return { ...m, payload: content };
+    }) : rows;
     return c.json({ agent_id: agentId, after_seq: afterSeq, dest: dest ?? null, count: messages.length, messages });
   });
 

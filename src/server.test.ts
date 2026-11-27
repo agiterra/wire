@@ -1134,6 +1134,23 @@ describe("GET /agents/:id/sent — an agent's OWN outbox after a seq, metadata o
     expect(((await all.json()) as { count: number }).count).toBe(2);
   });
 
+  test("include=payload returns the caller's own message bodies, unwrapped; the default still hides them", async () => {
+    const key = await agentWithKey("vacherin");
+    const asker = send("baguette", "vacherin", "question");
+    const reply = send("vacherin", "baguette", "Reply to 4242. PASS");
+    const res = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=${asker.seq}&dest=baguette&include=payload`, {
+      headers: { authorization: `Bearer ${await agentJwt("vacherin", key, "")}` },
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { messages: Array<{ seq: number; payload: { text: string } }> };
+    expect(json.messages.map((m) => m.seq)).toEqual([reply.seq]);
+    expect(json.messages[0].payload).toEqual({ text: "Reply to 4242. PASS" });
+    const plain = await fetch(`${baseUrl}/agents/vacherin/sent?after_seq=${asker.seq}&dest=baguette&include=other`, {
+      headers: { authorization: `Bearer ${await agentJwt("vacherin", key, "")}` },
+    });
+    expect(await plain.text()).not.toContain("Reply to 4242");
+  });
+
   test("an agent may NOT read another agent's outbox", async () => {
     const key = await agentWithKey("papassinos");
     await agentWithKey("vacherin");
